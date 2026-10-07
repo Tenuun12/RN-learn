@@ -1,0 +1,104 @@
+{
+  "name": "Mongolian OMR sheet - filled.png calibration v1",
+  "image_width": 1290,
+  "image_height": 1344,
+  "notes": [
+    "Calibrated directly from samples/filled.png (1290x1344).",
+    "Part 1 contains 60 questions with A-E choices.",
+    "Part 2 uses numeric choices 0-9, minus, and decimal point.",
+    "The supplied sample is cropped after row 2.4f; only the 30 fully visible Part 2 rows are configured."
+  ],
+  "alignment": {
+    "enabled": true,
+    "required": true,
+    "transform": "affine",
+    "dark_threshold": 60,
+    "minimum_matches": 12,
+    "max_match_distance": 20,
+    "line_tolerance": 5,
+    "ransac_threshold": 3.5,
+    "top_markers": [[152, 21.5], [238.5, 21.5], [280, 21.5], [879, 21.5], [920, 21.5]],
+    "left_marker_grid": {
+      "x": 152,
+      "y_start": 21.5,
+      "y_spacing": 25.625,
+      "count": 52
+    }
+  },
+  "detection": {
+    "sample_radius": 7,
+    "center_search_radius": 2,
+    "illumination_kernel": 41,
+    "annotation_radius": 11,
+    "dark_pixel_threshold": 80,
+    "adaptive_dark_threshold": {
+      "enabled": true,
+      "marker_percentile": 95,
+      "margin": 40,
+      "minimum": 70,
+      "maximum": 155,
+      "marker_half_width": 6,
+      "marker_half_height": 3
+    },
+    "filled_threshold": 0.45,
+    "weak_filled_threshold": 0.24,
+    "minimum_score_margin": 0.12,
+    "empty_threshold": 0.2
+  },
+  "parts": {
+    "part1": {
+      "label": "Part 1",
+      "options": ["A", "B", "C", "D", "E"],
+      "grids": [
+        {
+          "question_start": 1,
+          "count": 30,
+          "x_centers": [241, 263, 284, 306, 327],
+          "y_start": 429,
+          "y_spacing": 25.28
+        },
+        {
+          "question_start": 31,
+          "count": 30,
+          "x_centers": [388, 410, 431, 453, 474],
+          "y_start": 429,
+          "y_spacing": 25.28
+        }
+      ]
+    },
+    "part2": {
+      "label": "Part 2",
+      "options": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "-", "."],
+      "grids": [
+        {
+          "question_labels": ["2.1a", "2.1b", "2.1c", "2.1d", "2.1e", "2.1f", "2.1g", "2.1h"],
+          "count": 8,
+          "x_centers": [539, 581, 623, 664, 706, 748, 790, 831, 873, 915, 958, 1000],
+          "y_start": 431,
+          "y_spacing": 25.35
+        },
+        {
+          "question_labels": ["2.2a", "2.2b", "2.2c", "2.2d", "2.2e", "2.2f", "2.2g", "2.2h"],
+          "count": 8,
+          "x_centers": [539, 581, 623, 664, 706, 748, 790, 831, 873, 915, 958, 1000],
+          "y_start": 691,
+          "y_spacing": 25.35
+        },
+        {
+          "question_labels": ["2.3a", "2.3b", "2.3c", "2.3d", "2.3e", "2.3f", "2.3g", "2.3h"],
+          "count": 8,
+          "x_centers": [539, 581, 623, 664, 706, 748, 790, 831, 873, 915, 958, 1000],
+          "y_start": 948,
+          "y_spacing": 25.35
+        },
+        {
+          "question_labels": ["2.4a", "2.4b", "2.4c", "2.4d", "2.4e", "2.4f"],
+          "count": 6,
+          "x_centers": [539, 581, 623, 664, 706, 748, 790, 831, 873, 915, 958, 1000],
+          "y_start": 1202,
+          "y_spacing": 25.35
+        }
+      ]
+    }
+  }
+}

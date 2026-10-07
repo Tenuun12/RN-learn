@@ -1,0 +1,10 @@
+backend/runtime/
+.venv/
+.deps/
+backend/__pycache__/
+backend/omr/__pycache__/
+backend/tests/__pycache__/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+debug_omr.png
