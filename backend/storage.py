@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -10,7 +11,16 @@ from typing import Any
 from uuid import uuid4
 
 
-DEFAULT_DATA_PATH = Path(__file__).resolve().parent / "data" / "tests.json"
+BUNDLED_DATA_PATH = Path(__file__).resolve().parent / "data" / "tests.json"
+
+
+def default_data_path() -> Path:
+    configured = os.getenv("OMR_DATA_PATH")
+    if configured:
+        return Path(configured)
+    if os.getenv("VERCEL"):
+        return Path(tempfile.gettempdir()) / "omr-teacher" / "tests.json"
+    return BUNDLED_DATA_PATH
 
 
 class TestNotFoundError(KeyError):
@@ -26,12 +36,17 @@ class TestRepository:
 
     __test__ = False
 
-    def __init__(self, path: str | Path = DEFAULT_DATA_PATH) -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else default_data_path()
         self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self._write({"version": 1, "tests": {}, "active_test_id": None})
+            if self.path != BUNDLED_DATA_PATH and BUNDLED_DATA_PATH.exists():
+                with BUNDLED_DATA_PATH.open("r", encoding="utf-8") as handle:
+                    initial_data = json.load(handle)
+            else:
+                initial_data = {"version": 1, "tests": {}, "active_test_id": None}
+            self._write(initial_data)
 
     def _read(self) -> dict[str, Any]:
         with self.path.open("r", encoding="utf-8") as handle:

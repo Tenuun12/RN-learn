@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.omr.detector import Detection
+try:
+    from backend.omr.detector import Detection
+except ModuleNotFoundError:  # Vercel service root is backend/
+    from omr.detector import Detection
 
 
 def grade_detections(

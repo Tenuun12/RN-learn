@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+// Production uses Vercel's same-origin /api rewrite. Keep the explicit URL only
+// for the separate Vite + Uvicorn development workflow.
+const API_BASE = (
+  import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:8000" : "")
+).replace(/\/$/, "");
 const EMPTY_KEY = { part1: {}, part2: {} };
 const PART_TITLES = { part1: "Part 1", part2: "Part 2" };
 const STATUS_LABELS = {
@@ -293,7 +298,8 @@ function AnswerTable({ part, rows }) {
 }
 
 function Results({ data, onAnother, onEdit }) {
-  const annotatedUrl = `${API_BASE}${data.annotated_image_url}`;
+  const annotatedUrl = data.annotated_image_data_url
+    || `${API_BASE}${data.annotated_image_url}`;
   return (
     <section className="results">
       <div className="results-heading"><div><span className="eyebrow">Grading complete</span><h1>{data.test.name}</h1><p>Teacher key compared against detected student marks.</p><span className={`alignment-detail ${data.alignment.confidence < 0.7 ? "review" : ""}`}>{data.alignment.matched_markers}/{data.alignment.expected_markers} registration markers aligned · {data.alignment.confidence >= 0.7 ? "High-confidence fit" : "Review alignment"}</span></div><div className="heading-actions"><button className="secondary-button" onClick={onEdit}>Edit key</button><button className="primary-button" onClick={onAnother}>Grade another student</button></div></div>

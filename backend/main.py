@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -11,17 +14,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from backend.grading import grade_detections
-from backend.omr.errors import InvalidImageError, LayoutDetectionError
-from backend.omr.layout import questions_by_part
-from backend.omr.processor import OMRProcessor
-from backend.omr.visualizer import annotate_results
-from backend.storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
+try:
+    from backend.grading import grade_detections
+    from backend.omr.errors import InvalidImageError, LayoutDetectionError
+    from backend.omr.layout import questions_by_part
+    from backend.omr.processor import OMRProcessor
+    from backend.omr.visualizer import annotate_results
+    from backend.storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
+except ModuleNotFoundError:  # Vercel service root is backend/
+    from grading import grade_detections
+    from omr.errors import InvalidImageError, LayoutDetectionError
+    from omr.layout import questions_by_part
+    from omr.processor import OMRProcessor
+    from omr.visualizer import annotate_results
+    from storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
 
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-RUNTIME_DIR = BASE_DIR / "runtime"
+RUNTIME_DIR = Path(
+    os.getenv(
+        "OMR_RUNTIME_DIR",
+        str(Path(tempfile.gettempdir()) / "omr-teacher" / "results")
+        if os.getenv("VERCEL")
+        else str(BASE_DIR / "runtime"),
+    )
+)
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg"}
@@ -148,7 +166,8 @@ def layout_metadata() -> dict[str, Any]:
 
 @app.get("/api/sample")
 def sample_sheet() -> FileResponse:
-    path = PROJECT_ROOT / "samples" / "filled.png"
+    service_sample = BASE_DIR / "samples" / "filled.png"
+    path = service_sample if service_sample.exists() else PROJECT_ROOT / "samples" / "filled.png"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Sample sheet not found.")
     return FileResponse(path, media_type="image/png", filename="filled.png")
@@ -230,6 +249,15 @@ async def grade_student_sheet(test_id: str, image: UploadFile = File(...)) -> di
     output_path = RUNTIME_DIR / f"{result_id}.png"
     if not cv2.imwrite(str(output_path), annotated):
         raise HTTPException(status_code=500, detail="Unable to create the annotated result image.")
+    encoded_ok, encoded_overlay = cv2.imencode(
+        ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 88]
+    )
+    if not encoded_ok:
+        raise HTTPException(status_code=500, detail="Unable to encode the annotated result image.")
+    annotated_data_url = (
+        "data:image/jpeg;base64,"
+        + base64.b64encode(encoded_overlay.tobytes()).decode("ascii")
+    )
 
     return {
         "success": True,
@@ -244,6 +272,7 @@ async def grade_student_sheet(test_id: str, image: UploadFile = File(...)) -> di
         },
         "result_id": result_id,
         "annotated_image_url": f"/api/results/{result_id}/annotated.png",
+        "annotated_image_data_url": annotated_data_url,
     }
 
 

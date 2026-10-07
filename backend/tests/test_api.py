@@ -51,4 +51,5 @@ def test_complete_teacher_workflow(tmp_path, monkeypatch) -> None:
     assert payload["summary"]["total"]["questions"] == 5
     assert payload["summary"]["total"]["correct"] == 3
     assert payload["summary"]["total"]["score"] == 60.0
+    assert payload["annotated_image_data_url"].startswith("data:image/jpeg;base64,")
     assert client.get(payload["annotated_image_url"]).status_code == 200
