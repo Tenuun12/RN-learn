@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .errors import LayoutDetectionError
+from .layout import iter_questions
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ def _best_line_inliers(
     points: list[tuple[float, float]],
     orientation: str,
     tolerance: float,
+    anchor: tuple[float, float] | None = None,
 ) -> list[tuple[float, float]]:
     """Find the strongest near-horizontal/vertical marker line without assuming its position."""
     if len(points) < 2:
@@ -75,11 +77,22 @@ def _best_line_inliers(
                 continue
             if orientation == "horizontal" and abs(dx) < abs(dy) * 2.2:
                 continue
+            if anchor is not None:
+                anchor_offset = np.float32(anchor) - array[first]
+                anchor_distance = abs(
+                    float(vector[0] * anchor_offset[1] - vector[1] * anchor_offset[0])
+                ) / length
+                if anchor_distance > tolerance * 1.5:
+                    continue
             offsets = array - array[first]
             distances = np.abs(vector[0] * offsets[:, 1] - vector[1] * offsets[:, 0]) / length
             indices = np.flatnonzero(distances <= tolerance)
             if len(indices) < 3:
                 continue
+            if anchor is not None:
+                anchor_gaps = np.linalg.norm(array[indices] - np.float32(anchor), axis=1)
+                if float(anchor_gaps.min()) > max(tolerance * 3, 12):
+                    continue
             unit = vector / length
             projections = offsets[indices] @ unit
             span = float(np.ptp(projections))
@@ -108,10 +121,19 @@ def _lattice_correspondences(
     """Match the printed L-shaped registration lattice by order and spacing."""
     tolerance = float(config.get("line_tolerance", 5.0))
     rail = _dedupe_sorted(_best_line_inliers(candidates, "vertical", tolerance), axis=1)
-    top = _dedupe_sorted(_best_line_inliers(candidates, "horizontal", tolerance), axis=0)
     left = config.get("left_marker_grid")
     expected_top = [tuple(map(float, point)) for point in config.get("top_markers", [])]
-    if not left or len(rail) < 6 or len(top) < 4 or len(expected_top) < 4:
+    if not left or len(rail) < 6 or len(expected_top) < 4:
+        return np.empty((0, 2), np.float32), np.empty((0, 2), np.float32)
+
+    # The first top marker is also the first marker of the vertical rail. Anchoring
+    # the horizontal search at that shared corner prevents long diagonal rows in
+    # page content from winning when a QR footer changes the input aspect ratio.
+    top = _dedupe_sorted(
+        _best_line_inliers(candidates, "horizontal", tolerance, anchor=rail[0]),
+        axis=0,
+    )
+    if len(top) < 4:
         return np.empty((0, 2), np.float32), np.empty((0, 2), np.float32)
 
     source: list[tuple[float, float]] = []
@@ -193,16 +215,72 @@ def _match_points(
     return np.float32(source), np.float32(target)
 
 
-def align_image(image: np.ndarray, layout: dict[str, Any]) -> AlignmentResult:
+def _circle_grid_match(
+    image: np.ndarray, layout: dict[str, Any], config: dict[str, Any]
+) -> tuple[int, int]:
+    recognition = config.get("recognition", {})
+    expected = np.float32(
+        [
+            (bubble.x, bubble.y)
+            for question in iter_questions(layout)
+            for bubble in question.bubbles
+        ]
+    )
+    if len(expected) == 0:
+        return 0, 0
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=float(recognition.get("hough_dp", 1)),
+        minDist=float(recognition.get("hough_min_distance", 12)),
+        param1=float(recognition.get("hough_param1", 100)),
+        param2=float(recognition.get("hough_param2", 18)),
+        minRadius=int(recognition.get("minimum_radius", 7)),
+        maxRadius=int(recognition.get("maximum_radius", 13)),
+    )
+    if circles is None:
+        return 0, len(expected)
+    detected = np.float32(circles[0, :, :2])
+    maximum_distance = float(recognition.get("maximum_center_distance", 4))
+    matched = sum(
+        float(np.min(np.linalg.norm(detected - point, axis=1))) <= maximum_distance
+        for point in expected
+    )
+    return matched, len(expected)
+
+
+def align_image(
+    image: np.ndarray,
+    layout: dict[str, Any],
+    registration_image: np.ndarray | None = None,
+) -> AlignmentResult:
     width = int(layout["image_width"])
     height = int(layout["image_height"])
     resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+    marker_source = registration_image if registration_image is not None else image
+    marker_image = cv2.resize(marker_source, (width, height), interpolation=cv2.INTER_AREA)
     config = layout.get("alignment", {})
     if not config.get("enabled", True):
+        recognition = config.get("recognition", {})
+        if recognition.get("enabled", False):
+            matched, expected_count = _circle_grid_match(resized, layout, config)
+            confidence = matched / max(expected_count, 1)
+            if confidence < float(recognition.get("minimum_match_ratio", 0.75)):
+                raise LayoutDetectionError(
+                    "This image does not match the selected answer-sheet template."
+                )
+            return AlignmentResult(
+                resized,
+                matched,
+                expected_count,
+                confidence,
+                "template-circle-grid",
+            )
         return AlignmentResult(resized, 0, 0, 1.0, "resize")
 
     expected = _expected_markers(config)
-    candidates = _find_registration_markers(resized, config)
+    candidates = _find_registration_markers(marker_image, config)
     source, target = _lattice_correspondences(candidates, config)
     method = "registration-lattice-affine"
     if len(source) < int(config.get("minimum_matches", 5)):
@@ -236,6 +314,13 @@ def align_image(image: np.ndarray, layout: dict[str, Any]) -> AlignmentResult:
     if matrix is None:
         raise LayoutDetectionError(
             "Unable to align the answer sheet. Please upload a clearer image."
+        )
+    singular_values = np.linalg.svd(matrix[:, :2], compute_uv=False)
+    smallest = float(singular_values.min())
+    largest = float(singular_values.max())
+    if smallest < 0.35 or largest > 3.0 or largest / max(smallest, 0.001) > 3.0:
+        raise LayoutDetectionError(
+            "The detected answer sheet alignment is distorted. Please check the image framing."
         )
     aligned = cv2.warpAffine(
         resized,

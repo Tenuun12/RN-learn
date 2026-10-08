@@ -5,6 +5,7 @@ import numpy as np
 
 from backend.grading import grade_detections
 from backend.omr.processor import OMRProcessor
+from backend.qr import detect_qr_codes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,6 +67,48 @@ def test_camera_framing_rotation_and_jpeg_compression_are_aligned() -> None:
     result = processor.detect_bytes(encoded.tobytes())
 
     assert result.alignment.method == "registration-lattice-affine"
+    assert result.alignment.matched_markers >= 40
+    assert result.public_answers() == reference
+
+
+def test_qr_finder_patterns_do_not_corrupt_omr_alignment() -> None:
+    processor = OMRProcessor()
+    image = cv2.imread(str(ROOT / "samples" / "filled.png"))
+    reference = processor.detect_image(image).public_answers()
+    expected_url = "https://example.com/results/student-42"
+    qr = cv2.QRCodeEncoder_create().encode(expected_url)
+    qr = cv2.resize(qr, (360, 360), interpolation=cv2.INTER_NEAREST)
+    image[0:360, 400:760] = cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
+
+    qr_result = detect_qr_codes(image)
+    result = processor.detect_image(image, qr_result.mask_for_alignment(image))
+
+    assert qr_result.first is not None
+    assert qr_result.first.url == expected_url
+    assert result.public_answers() == reference
+
+
+def test_qr_footer_does_not_change_marker_row_numbers() -> None:
+    processor = OMRProcessor()
+    sheet = cv2.imread(str(ROOT / "samples" / "filled.png"))
+    reference = processor.detect_image(sheet).public_answers()
+    height, width = sheet.shape[:2]
+    combined = np.full((height + 354, width, 3), 255, dtype=np.uint8)
+    combined[:height] = sheet
+    expected_url = "https://scanned.page/test-result"
+    qr = cv2.QRCodeEncoder_create().encode(expected_url)
+    qr = cv2.resize(qr, (260, 260), interpolation=cv2.INTER_NEAREST)
+    combined[height + 40 : height + 300, 516:776] = cv2.cvtColor(
+        qr, cv2.COLOR_GRAY2BGR
+    )
+
+    qr_result = detect_qr_codes(combined)
+    result = processor.detect_image(combined, qr_result.mask_for_alignment(combined))
+
+    assert qr_result.first is not None
+    assert qr_result.first.url == expected_url
+    assert len(qr_result.preview_images(combined)) == 1
+    assert max(qr_result.preview_images(combined)[0].shape[:2]) <= 420
     assert result.alignment.matched_markers >= 40
     assert result.public_answers() == reference
 

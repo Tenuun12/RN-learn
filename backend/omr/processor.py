@@ -45,6 +45,11 @@ class OMRProcessor:
 
     def detect_bytes(self, data: bytes) -> OMRReadResult:
         image = self.decode_image(data)
-        alignment = align_image(image, self.layout)
+        return self.detect_image(image)
+
+    def detect_image(
+        self, image: np.ndarray, registration_image: np.ndarray | None = None
+    ) -> OMRReadResult:
+        alignment = align_image(image, self.layout, registration_image)
         detections = detect_answers(alignment.image, self.layout)
         return OMRReadResult(alignment.image, detections, alignment)

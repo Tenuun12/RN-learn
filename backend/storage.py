@@ -70,12 +70,14 @@ class TestRepository:
         name: str,
         part_counts: dict[str, int],
         scoring: dict[str, Any],
+        layout_id: str = "legacy_red_60_30_v1",
     ) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         test_id = uuid4().hex[:12]
         record = {
             "id": test_id,
             "name": name.strip(),
+            "layout_id": layout_id,
             "part_counts": deepcopy(part_counts),
             "answer_key": None,
             "scoring": deepcopy(scoring),

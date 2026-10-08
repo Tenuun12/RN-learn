@@ -14,6 +14,22 @@ const STATUS_LABELS = {
   unanswered: "Unanswered",
   invalid: "Multiple",
 };
+const SAVED_KEYS_STORAGE = "omr-teacher-answer-keys-v1";
+
+function loadSavedKeys() {
+  try {
+    const records = JSON.parse(localStorage.getItem(SAVED_KEYS_STORAGE) || "[]");
+    return Array.isArray(records)
+      ? records.filter((record) => record?.id && record?.name && record?.answer_key)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeSavedKeys(records) {
+  localStorage.setItem(SAVED_KEYS_STORAGE, JSON.stringify(records));
+}
 
 async function api(path, options) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -22,7 +38,9 @@ async function api(path, options) {
     const detail = Array.isArray(payload.detail)
       ? payload.detail.map((item) => item.msg).join(" ")
       : payload.detail;
-    throw new Error(detail || "The request could not be completed.");
+    const error = new Error(detail || "The request could not be completed.");
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -44,9 +62,14 @@ function StepRail({ stage }) {
   );
 }
 
-function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
+function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy, setError }) {
   const [name, setName] = useState("");
   const [counts, setCounts] = useState({ part1: 20, part2: 20 });
+  const templates = layout.templates?.length
+    ? layout.templates
+    : [{ id: layout.id || "legacy_red_60_30_v1", name: layout.name, parts: layout.parts }];
+  const [layoutId, setLayoutId] = useState(templates[0].id);
+  const selectedTemplate = templates.find((template) => template.id === layoutId) || templates[0];
 
   async function submit(event) {
     event.preventDefault();
@@ -56,7 +79,7 @@ function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
       const payload = await api("/api/tests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, part_counts: counts }),
+        body: JSON.stringify({ name, part_counts: counts, layout_id: layoutId }),
       });
       onCreated(payload.test);
     } catch (error) {
@@ -67,7 +90,31 @@ function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
   }
 
   return (
-    <section className="workspace-card create-card">
+    <div className="key-library-page">
+      <section className="workspace-card saved-key-library">
+        <div className="section-intro compact">
+          <span className="eyebrow">Saved answer keys</span>
+          <h1>Choose a previous key</h1>
+          <p>Keys saved in this browser remain available after a Vercel redeploy or server cold start.</p>
+        </div>
+        {savedKeys.length > 0 ? (
+          <div className="saved-key-list">
+            {savedKeys.map((record) => (
+              <article className="saved-key-card" key={record.id}>
+                <div>
+                  <strong>{record.name}</strong>
+                  <span>{record.layout_name || "Original OMR - 60 + 30"}</span>
+                  <span>Part 1 · {record.part_counts.part1} questions</span>
+                  <span>Part 2 · {record.part_counts.part2} questions</span>
+                  <small>Saved {new Date(record.updated_at).toLocaleString()}</small>
+                </div>
+                <button className="primary-button" disabled={busy} onClick={() => onChooseSaved(record)}>Use this key</button>
+              </article>
+            ))}
+          </div>
+        ) : <div className="empty-library">No saved keys yet. Create one below and it will appear here.</div>}
+      </section>
+      <section className="workspace-card create-card">
       <div className="section-intro">
         <span className="eyebrow">Create test</span>
         <h1>Set up the answer key</h1>
@@ -78,6 +125,24 @@ function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
           <span>Test name</span>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Mathematics midterm" required maxLength={120} />
         </label>
+        <label className="field wide">
+          <span>Answer-sheet template</span>
+          <select
+            value={layoutId}
+            onChange={(event) => {
+              const nextId = event.target.value;
+              const nextTemplate = templates.find((template) => template.id === nextId);
+              setLayoutId(nextId);
+              setCounts({
+                part1: nextTemplate.parts.part1.maximum_questions,
+                part2: nextTemplate.parts.part2.maximum_questions,
+              });
+            }}
+          >
+            {templates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}
+          </select>
+          <small>Choose the format that matches the uploaded answer sheet.</small>
+        </label>
         <div className="count-grid">
           {["part1", "part2"].map((part) => (
             <label className="field" key={part}>
@@ -85,11 +150,11 @@ function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
               <input
                 type="number"
                 min="1"
-                max={layout.parts[part].maximum_questions}
+                max={selectedTemplate.parts[part].maximum_questions}
                 value={counts[part]}
                 onChange={(event) => setCounts({ ...counts, [part]: Number(event.target.value) })}
               />
-              <small>Maximum {layout.parts[part].maximum_questions} on this template</small>
+              <small>Maximum {selectedTemplate.parts[part].maximum_questions} on this template</small>
             </label>
           ))}
         </div>
@@ -98,7 +163,8 @@ function CreateTest({ layout, onCreated, busy, setBusy, setError }) {
           <button className="primary-button" disabled={busy || !name.trim()}>{busy ? "Creating…" : "Create test & enter answers"}<b>→</b></button>
         </div>
       </form>
-    </section>
+      </section>
+    </div>
   );
 }
 
@@ -163,7 +229,10 @@ function AnswerKeyEditor({ test, initialKey, onSaved, busy, setBusy, setError })
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(key),
       });
-      onSaved(payload.test, payload.answer_key);
+      onSaved(
+        test.library_id ? { ...payload.test, library_id: test.library_id } : payload.test,
+        payload.answer_key,
+      );
     } catch (error) {
       setError(error.message);
     } finally {
@@ -197,7 +266,7 @@ function AnswerKeyEditor({ test, initialKey, onSaved, busy, setBusy, setError })
   );
 }
 
-function UploadStage({ test, onEdit, onGraded, busy, setBusy, setError }) {
+function UploadStage({ test, answerKey, onEdit, onGraded, busy, setBusy, setError }) {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
@@ -235,6 +304,14 @@ function UploadStage({ test, onEdit, onGraded, busy, setBusy, setError }) {
     setError("");
     const body = new FormData();
     body.append("image", file);
+    body.append("answer_key_json", JSON.stringify(answerKey));
+    body.append("test_config_json", JSON.stringify({
+      name: test.name,
+      layout_id: test.layout_id || "legacy_red_60_30_v1",
+      part_counts: test.part_counts,
+      created_at: test.created_at,
+      updated_at: test.updated_at,
+    }));
     try {
       const payload = await api(`/api/tests/${test.id}/grade`, { method: "POST", body });
       onGraded(payload);
@@ -297,14 +374,62 @@ function AnswerTable({ part, rows }) {
   );
 }
 
+function safeQrUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function QRResult({ data }) {
+  const fallbackCodes = data.qr_detected && data.qr_data
+    ? [{ data: data.qr_data, url: data.qr_url }]
+    : [];
+  const codes = Array.isArray(data.qr_codes) && data.qr_codes.length
+    ? data.qr_codes
+    : fallbackCodes;
+
+  return (
+    <section className={`qr-panel ${codes.length ? "detected" : "not-detected"}`} aria-label="QR code result">
+      <div className="panel-heading">
+        <div><span className="eyebrow">QR code</span><h2>{codes.length ? "Detected" : "Not detected"}</h2></div>
+        <span className={`qr-status ${codes.length ? "detected" : "empty"}`}><i />{codes.length ? `${codes.length} found` : "No readable code"}</span>
+      </div>
+      {codes.length > 0 && (
+        <div className="qr-code-list">
+          {codes.map((code, index) => {
+            const url = safeQrUrl(code.url);
+            return (
+              <article className="qr-code-item" key={`${code.data}-${index}`}>
+                <div><small>{codes.length > 1 ? `QR ${index + 1} data` : "Decoded data"}</small><p>{code.data}</p></div>
+                {url && <a className="primary-button qr-link" href={url} target="_blank" rel="noopener noreferrer">Open QR link <span aria-hidden="true">↗</span></a>}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Results({ data, onAnother, onEdit }) {
   const annotatedUrl = data.annotated_image_data_url
     || `${API_BASE}${data.annotated_image_url}`;
+  const qrPreviewUrls = Array.isArray(data.qr_image_data_urls) && data.qr_image_data_urls.length
+    ? data.qr_image_data_urls
+    : (data.qr_image_data_url ? [data.qr_image_data_url] : []);
+  const alignmentLabel = data.alignment.method === "template-circle-grid"
+    ? "template bubbles matched"
+    : "registration markers aligned";
   return (
     <section className="results">
-      <div className="results-heading"><div><span className="eyebrow">Grading complete</span><h1>{data.test.name}</h1><p>Teacher key compared against detected student marks.</p><span className={`alignment-detail ${data.alignment.confidence < 0.7 ? "review" : ""}`}>{data.alignment.matched_markers}/{data.alignment.expected_markers} registration markers aligned · {data.alignment.confidence >= 0.7 ? "High-confidence fit" : "Review alignment"}</span></div><div className="heading-actions"><button className="secondary-button" onClick={onEdit}>Edit key</button><button className="primary-button" onClick={onAnother}>Grade another student</button></div></div>
+      <div className="results-heading"><div><span className="eyebrow">Grading complete</span><h1>{data.test.name}</h1><p>Teacher key compared against detected student marks.</p><span className={`alignment-detail ${data.alignment.confidence < 0.7 ? "review" : ""}`}>{data.alignment.matched_markers}/{data.alignment.expected_markers} {alignmentLabel} · {data.alignment.confidence >= 0.7 ? "High-confidence fit" : "Review alignment"}</span></div><div className="heading-actions"><button className="secondary-button" onClick={onEdit}>Edit key</button><button className="primary-button" onClick={onAnother}>Grade another student</button></div></div>
       <div className="score-grid"><ScoreCard title="Part 1" summary={data.summary.part1} /><ScoreCard title="Part 2" summary={data.summary.part2} tone="blue" /><ScoreCard title="Total score" summary={data.summary.total} tone="dark" /></div>
-      <section className="visual-panel"><div className="panel-heading"><div><span className="eyebrow">Detection overlay</span><h2>Visual verification</h2></div><div className="legend"><span className="correct">Correct</span><span className="incorrect">Incorrect</span><span className="unanswered">Blank</span><span className="invalid">Multiple</span></div></div><a href={annotatedUrl} target="_blank" rel="noreferrer"><img src={annotatedUrl} alt="Student OMR with grading annotations" /></a></section>
+      <QRResult data={data} />
+      <section className="visual-panel"><div className="panel-heading"><div><span className="eyebrow">Detection overlay</span><h2>Visual verification</h2></div><div className="legend"><span className="correct">Correct</span><span className="incorrect">Incorrect</span><span className="unanswered">Blank</span><span className="invalid">Multiple</span></div></div><div className={`visual-content ${qrPreviewUrls.length ? "with-qr" : ""}`}><a className="visual-overlay" href={annotatedUrl} target="_blank" rel="noreferrer"><img src={annotatedUrl} alt="Student OMR with grading annotations" /></a>{qrPreviewUrls.length > 0 && <aside className="qr-preview"><span className="eyebrow">From original upload</span><h3>Detected QR {qrPreviewUrls.length > 1 ? "codes" : "code"}</h3>{qrPreviewUrls.map((url, index) => <img src={url} alt={`Detected QR code ${index + 1}`} key={index} />)}<small>The QR is shown separately so it cannot shift the calibrated OMR overlay.</small></aside>}</div></section>
       <AnswerTable part="part1" rows={data.grading.part1} />
       <AnswerTable part="part2" rows={data.grading.part2} />
     </section>
@@ -320,6 +445,34 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [savedKeys, setSavedKeys] = useState(loadSavedKeys);
+
+  function rememberAnswerKey(test, key, requestedLibraryId) {
+    setSavedKeys((current) => {
+      const existing = current.find((record) => record.server_id === test.id);
+      const libraryId = requestedLibraryId || test.library_id || existing?.id || test.id;
+      const record = {
+        id: libraryId,
+        server_id: test.id,
+        name: test.name,
+        layout_id: test.layout_id || "legacy_red_60_30_v1",
+        layout_name: test.layout_id === "school21_70_32_v1"
+          ? "School 21 OMR - 70 + 32"
+          : "Original OMR - 60 + 30",
+        part_counts: { ...test.part_counts },
+        answer_key: {
+          part1: { ...key.part1 },
+          part2: { ...key.part2 },
+        },
+        created_at: test.created_at || existing?.created_at || new Date().toISOString(),
+        updated_at: test.updated_at || new Date().toISOString(),
+      };
+      const next = [record, ...current.filter((item) => item.id !== libraryId)]
+        .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)));
+      storeSavedKeys(next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     Promise.all([api("/api/layout"), api("/api/tests")])
@@ -339,6 +492,7 @@ export default function App() {
       try {
         const payload = await api(`/api/tests/${test.id}/answer-key`);
         setAnswerKey(payload.answer_key);
+        rememberAnswerKey(test, payload.answer_key);
         setStage("upload");
       } catch (loadError) { setError(loadError.message); }
     } else {
@@ -357,8 +511,51 @@ export default function App() {
   function saved(test, key) {
     setActiveTest(test);
     setAnswerKey(key);
+    rememberAnswerKey(test, key, test.library_id);
     setTests((current) => current.map((item) => item.id === test.id ? test : item));
     setStage("upload");
+  }
+
+  async function chooseSavedKey(record) {
+    setBusy(true);
+    setError("");
+    try {
+      let targetTest = null;
+      if (record.server_id) {
+        try {
+          targetTest = (await api(`/api/tests/${record.server_id}`)).test;
+        } catch (loadError) {
+          if (loadError.status !== 404) throw loadError;
+        }
+      }
+      if (!targetTest) {
+        targetTest = (await api("/api/tests", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: record.name,
+            part_counts: record.part_counts,
+            layout_id: record.layout_id || "legacy_red_60_30_v1",
+          }),
+        })).test;
+      }
+      const payload = await api(`/api/tests/${targetTest.id}/answer-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(record.answer_key),
+      });
+      const selectedTest = { ...payload.test, library_id: record.id };
+      rememberAnswerKey(selectedTest, payload.answer_key, record.id);
+      setTests((current) => [selectedTest, ...current.filter((item) => item.id !== selectedTest.id)]);
+      setActiveTest(selectedTest);
+      setAnswerKey(payload.answer_key);
+      setResult(null);
+      setStage("upload");
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   const headerTitle = useMemo(() => activeTest?.name || "Teacher grading studio", [activeTest]);
@@ -368,15 +565,15 @@ export default function App() {
   return (
     <main>
       <header className="app-header">
-        <div className="topbar"><div className="brand"><span>OM</span><div><strong>OMR Teacher</strong><small>Grading workspace</small></div></div><div className="test-switcher">{tests.length > 0 && <select aria-label="Select test" value={activeTest?.id || ""} onChange={(event) => selectTest(tests.find((test) => test.id === event.target.value))}>{tests.map((test) => <option value={test.id} key={test.id}>{test.name}</option>)}</select>}<button onClick={() => { setActiveTest(null); setAnswerKey(null); setResult(null); setStage("create"); }}>+ New test</button></div></div>
+        <div className="topbar"><div className="brand"><span>OM</span><div><strong>OMR Teacher</strong><small>Grading workspace</small></div></div><div className="test-switcher">{tests.length > 0 && <select aria-label="Select test" value={activeTest?.id || ""} onChange={(event) => selectTest(tests.find((test) => test.id === event.target.value))}>{tests.map((test) => <option value={test.id} key={test.id}>{test.name}</option>)}</select>}<button onClick={() => { setActiveTest(null); setAnswerKey(null); setResult(null); setStage("create"); }}>Answer keys</button></div></div>
         <div className="header-copy"><span className="kicker">Teacher-owned answer keys</span><h2>{headerTitle}</h2><p>Create the key, scan the student's sheet, then review every detected mark.</p></div>
         <StepRail stage={stage} />
       </header>
       <div className="page-shell">
         {error && <div className="error-banner" role="alert"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
-        {stage === "create" && <CreateTest layout={layout} onCreated={created} busy={busy} setBusy={setBusy} setError={setError} />}
+        {stage === "create" && <CreateTest layout={layout} savedKeys={savedKeys} onChooseSaved={chooseSavedKey} onCreated={created} busy={busy} setBusy={setBusy} setError={setError} />}
         {stage === "key" && activeTest && <AnswerKeyEditor test={activeTest} initialKey={answerKey} onSaved={saved} busy={busy} setBusy={setBusy} setError={setError} />}
-        {stage === "upload" && activeTest && <UploadStage test={activeTest} onEdit={() => setStage("key")} onGraded={(payload) => { setResult(payload); setStage("results"); window.scrollTo({ top: 0, behavior: "smooth" }); }} busy={busy} setBusy={setBusy} setError={setError} />}
+        {stage === "upload" && activeTest && <UploadStage test={activeTest} answerKey={answerKey} onEdit={() => setStage("key")} onGraded={(payload) => { setResult(payload); setStage("results"); window.scrollTo({ top: 0, behavior: "smooth" }); }} busy={busy} setBusy={setBusy} setError={setError} />}
         {stage === "results" && result && <Results data={result} onAnother={() => setStage("upload")} onEdit={() => setStage("key")} />}
       </div>
       <footer>OMR Teacher <span>·</span> Teacher key → OMR detection → grading <span>·</span> OpenCV</footer>
