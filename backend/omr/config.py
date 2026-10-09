@@ -15,3 +15,8 @@ def load_json(path: str | Path) -> dict[str, Any]:
 
 def load_layout(path: str | Path | None = None) -> dict[str, Any]:
     return load_json(path or CONFIG_DIR / "omr_layout.json")
+
+
+def discover_layout_paths() -> list[Path]:
+    """Return every installed layout definition without hardcoded template ids."""
+    return sorted(CONFIG_DIR.glob("*layout.json"))

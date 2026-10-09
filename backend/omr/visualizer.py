@@ -13,6 +13,7 @@ COLORS = {
     "incorrect": (58, 65, 220),
     "unanswered": (31, 184, 230),
     "invalid": (22, 125, 245),
+    "uncertain": (196, 114, 52),
 }
 
 

@@ -42,6 +42,7 @@ def test_complete_teacher_workflow(tmp_path, monkeypatch) -> None:
         json={"name": "Manual grading test", "part_counts": {"part1": 3, "part2": 2}},
     )
     assert created.status_code == 201
+    assert created.json()["test"]["layout_id"] == "auto"
     test_id = created.json()["test"]["id"]
 
     missing = client.post(
@@ -71,7 +72,16 @@ def test_complete_teacher_workflow(tmp_path, monkeypatch) -> None:
     assert graded.status_code == 200
     payload = graded.json()
     assert payload["answer_key"] == answer_key
+    assert payload["alignment"]["selection"] == "automatic"
+    assert payload["alignment"]["template_id"] == "legacy_red_60_30_v1"
     assert payload["student_answers"]["part1"] == {"1": "B", "2": "A", "3": "D"}
+    assert len(payload["detected_answers"]["part1"]) == 60
+    assert len(payload["detected_answers"]["part2"]) == 30
+    assert [
+        option["label"]
+        for option in payload["detected_answers"]["part1"]["1"]["options"]
+    ] == ["A", "B", "C", "D", "E"]
+    assert len(payload["detected_answers"]["part2"]["2.1a"]["options"]) == 12
     assert payload["summary"]["total"]["questions"] == 5
     assert payload["summary"]["total"]["correct"] == 3
     assert payload["summary"]["total"]["score"] == 60.0

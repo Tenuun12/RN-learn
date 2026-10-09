@@ -38,17 +38,28 @@ reported as not detected and never prevents OMR grading.
 The response also includes a compact `qr_image_data_url` preview from the original
 upload so the code remains visible beside the calibrated OMR verification image.
 
-## Supported OMR templates
+## Automatic OMR template detection
 
-The test-creation screen exposes two independently calibrated formats:
+The test-creation screen does not require a template selection. At grading time the
+backend discovers every `*layout.json` definition, vision-tests the uploaded sheet
+against each layout, and uses the strongest valid match. If none matches, a generic
+vision fallback detects repeated circular bubble grids directly from the image, groups
+dynamic choice columns, and processes them without saving another layout. The currently
+installed high-accuracy formats are:
 
 - `legacy_red_60_30_v1`: the original red sheet with 60 Part 1 and 30 Part 2 rows.
 - `school21_70_32_v1`: the School 21 sheet with 70 Part 1 and 32 Part 2 rows.
 
-Each saved answer key records its `layout_id`. Grading uses that selected layout and
-rejects an image whose registration lattice or circle grid belongs to another format.
-For the School 21 template, the handwritten code and variant fields are intentionally
-ignored; only the Part 1 and Part 2 answer bubbles are graded.
+New answer keys use `layout_id: "auto"`; older records that contain a specific layout
+id remain readable. The grading response reports the detected format under
+`alignment.template_id` and returns every row and every dynamically available choice
+under `detected_answers`, including each option's fill score. Ambiguous marks are
+reported as `uncertain` without stopping the remaining rows. For the School 21 format,
+the handwritten code and variant fields remain outside grading.
+
+The generic fallback supports bubble-based OMR sheets. It cannot infer the meaning of
+handwritten free-response boxes; those require a separate handwriting/OCR model and are
+not treated as answer bubbles.
 
 ## Local verification
 

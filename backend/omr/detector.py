@@ -15,6 +15,7 @@ class Detection:
     selected: tuple[str, ...]
     fill_scores: dict[str, float]
     confidence: float
+    state: str
 
 
 def _registration_points(layout: dict[str, Any]) -> list[tuple[float, float]]:
@@ -127,9 +128,11 @@ def detect_question(gray: np.ndarray, question: Question, detection: dict[str, A
     if len(selected) == 1:
         answer: str | None = selected[0]
         confidence = scores[answer]
+        state = "selected"
     elif len(selected) > 1:
         answer = "Multiple"
         confidence = min(scores[option] for option in selected)
+        state = "multiple"
     else:
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         top_option, peak = ranked[0]
@@ -139,20 +142,24 @@ def detect_question(gray: np.ndarray, question: Question, detection: dict[str, A
             answer = top_option
             selected = (top_option,)
             confidence = max(0.5, min(peak / max(filled_threshold, 0.001), 1.0))
+            state = "selected"
         elif len(weak_selected) > 1:
             answer = "Multiple"
             selected = weak_selected
             confidence = min(scores[option] for option in weak_selected)
+            state = "multiple"
         else:
             answer = None
             if peak <= empty_threshold:
                 confidence = 1.0 - peak
+                state = "blank"
             else:
                 confidence = max(
                     0.0,
                     (weak_threshold - peak) / max(weak_threshold - empty_threshold, 0.001),
                 )
-    return Detection(answer, selected, scores, round(confidence, 4))
+                state = "uncertain"
+    return Detection(answer, selected, scores, round(confidence, 4), state)
 
 
 def detect_answers(image: np.ndarray, layout: dict[str, Any]) -> dict[str, dict[str, Detection]]:

@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 
 from backend.grading import grade_detections
+from backend.omr.detector import detect_question
+from backend.omr.layout import Bubble, Question
 from backend.omr.processor import OMRProcessor
 from backend.qr import detect_qr_codes
 
@@ -152,3 +154,41 @@ def test_unanswered_and_multiple_are_classified() -> None:
 
     assert graded["grading"]["part1"]["1"]["status"] == "unanswered"
     assert graded["grading"]["part1"]["2"]["status"] == "invalid"
+
+
+def test_ambiguous_option_is_uncertain_without_stopping_other_rows() -> None:
+    gray = np.full((60, 100), 255, dtype=np.uint8)
+    cv2.circle(gray, (25, 30), 4, 0, -1)
+    question = Question(
+        "part1",
+        "1",
+        (
+            Bubble("part1", "1", "A", 25, 30),
+            Bubble("part1", "1", "B", 70, 30),
+        ),
+    )
+    detection = detect_question(
+        gray,
+        question,
+        {
+            "sample_radius": 7,
+            "center_search_radius": 0,
+            "dark_pixel_threshold": 100,
+            "filled_threshold": 0.45,
+            "weak_filled_threshold": 0.40,
+            "minimum_score_margin": 0.12,
+            "empty_threshold": 0.20,
+        },
+    )
+
+    assert detection.state == "uncertain"
+    assert detection.answer is None
+    assert set(detection.fill_scores) == {"A", "B"}
+    graded = grade_detections(
+        {"part1": {"1": detection}, "part2": {}},
+        {"part1": {"1": "A"}, "part2": {}},
+        SCORING,
+    )
+    assert graded["grading"]["part1"]["1"]["status"] == "uncertain"
+    assert graded["student_answers"]["part1"]["1"] == "Uncertain"
+    assert graded["summary"]["total"]["uncertain"] == 1

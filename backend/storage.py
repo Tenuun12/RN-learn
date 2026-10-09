@@ -70,7 +70,7 @@ class TestRepository:
         name: str,
         part_counts: dict[str, int],
         scoring: dict[str, Any],
-        layout_id: str = "legacy_red_60_30_v1",
+        layout_id: str = "auto",
     ) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         test_id = uuid4().hex[:12]

@@ -18,7 +18,7 @@ try:
     from backend.grading import grade_detections
     from backend.omr.errors import InvalidImageError, LayoutDetectionError
     from backend.omr.layout import questions_by_part
-    from backend.omr.processor import OMRProcessor
+    from backend.omr.processor import AutoOMRProcessor, OMRProcessor
     from backend.omr.visualizer import annotate_results
     from backend.qr import QRDetectionResult, detect_qr_codes
     from backend.storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # Vercel service root is backend/
     from grading import grade_detections
     from omr.errors import InvalidImageError, LayoutDetectionError
     from omr.layout import questions_by_part
-    from omr.processor import OMRProcessor
+    from omr.processor import AutoOMRProcessor, OMRProcessor
     from omr.visualizer import annotate_results
     from qr import QRDetectionResult, detect_qr_codes
     from storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
@@ -50,7 +50,7 @@ ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg"}
 class CreateTestRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     part_counts: dict[str, int]
-    layout_id: str = "legacy_red_60_30_v1"
+    layout_id: str = "auto"
 
 
 class AnswerKeyRequest(BaseModel):
@@ -58,12 +58,9 @@ class AnswerKeyRequest(BaseModel):
     part2: dict[str, str]
 
 
-DEFAULT_LAYOUT_ID = "legacy_red_60_30_v1"
-processors = {
-    DEFAULT_LAYOUT_ID: OMRProcessor(),
-    "school21_70_32_v1": OMRProcessor(BASE_DIR / "config" / "school21_layout.json"),
-}
-processor = processors[DEFAULT_LAYOUT_ID]
+AUTO_LAYOUT_ID = "auto"
+auto_processor = AutoOMRProcessor()
+processors = auto_processor.processors
 repository = TestRepository()
 with (BASE_DIR / "config" / "scoring.json").open("r", encoding="utf-8") as handle:
     default_scoring: dict[str, Any] = json.load(handle)
@@ -76,7 +73,35 @@ def _processor_for_layout(layout_id: str) -> OMRProcessor:
     return selected
 
 
-def _part_schema(layout_id: str = DEFAULT_LAYOUT_ID) -> dict[str, dict[str, Any]]:
+def _automatic_part_schema() -> dict[str, dict[str, Any]]:
+    """Combine installed layouts so test setup does not require choosing one."""
+    combined: dict[str, dict[str, Any]] = {}
+    for selected in processors.values():
+        for part, schema in _part_schema(str(selected.layout["id"])).items():
+            target = combined.setdefault(
+                part,
+                {
+                    "label": schema["label"],
+                    "options": [],
+                    "question_labels": [],
+                    "maximum_questions": 0,
+                },
+            )
+            for option in schema["options"]:
+                if option not in target["options"]:
+                    target["options"].append(option)
+            for question in schema["question_labels"]:
+                if question not in target["question_labels"]:
+                    target["question_labels"].append(question)
+            target["maximum_questions"] = max(
+                target["maximum_questions"], schema["maximum_questions"]
+            )
+    return combined
+
+
+def _part_schema(layout_id: str = AUTO_LAYOUT_ID) -> dict[str, dict[str, Any]]:
+    if layout_id == AUTO_LAYOUT_ID:
+        return _automatic_part_schema()
     selected = _processor_for_layout(layout_id)
     return {
         part: {
@@ -90,7 +115,7 @@ def _part_schema(layout_id: str = DEFAULT_LAYOUT_ID) -> dict[str, dict[str, Any]
 
 
 def _serialize_test(record: dict[str, Any]) -> dict[str, Any]:
-    layout_id = record.get("layout_id", DEFAULT_LAYOUT_ID)
+    layout_id = record.get("layout_id", AUTO_LAYOUT_ID)
     schema = _part_schema(layout_id)
     parts = {}
     for part in ("part1", "part2"):
@@ -109,18 +134,18 @@ def _serialize_test(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_part_counts(
-    part_counts: dict[str, int], layout_id: str = DEFAULT_LAYOUT_ID
+    part_counts: dict[str, int], layout_id: str = AUTO_LAYOUT_ID
 ) -> dict[str, int]:
     if set(part_counts) != {"part1", "part2"}:
         raise HTTPException(status_code=422, detail="Part 1 and Part 2 question counts are required.")
     schema = _part_schema(layout_id)
     for part, count in part_counts.items():
         maximum = schema[part]["maximum_questions"]
-        if count < 1 or count > maximum:
+        if count < 0 or count > maximum:
             label = schema[part]["label"]
             raise HTTPException(
                 status_code=422,
-                detail=f"{label} must contain between 1 and {maximum} questions for this OMR template.",
+                detail=f"{label} must contain between 0 and {maximum} questions.",
             )
     return part_counts
 
@@ -129,7 +154,7 @@ def _validate_answer_key(
     test: dict[str, Any], payload: AnswerKeyRequest
 ) -> dict[str, dict[str, str]]:
     submitted = {"part1": payload.part1, "part2": payload.part2}
-    schema = _part_schema(test.get("layout_id", DEFAULT_LAYOUT_ID))
+    schema = _part_schema(test.get("layout_id", AUTO_LAYOUT_ID))
     errors: list[str] = []
     cleaned: dict[str, dict[str, str]] = {}
     for part in ("part1", "part2"):
@@ -157,6 +182,60 @@ def _validate_answer_key(
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     return cleaned
+
+
+def _validate_key_for_detected_layout(
+    answer_key: dict[str, dict[str, str]], detections: dict[str, Any]
+) -> None:
+    errors: list[str] = []
+    for part, answers in answer_key.items():
+        detected_part = detections.get(part, {})
+        for question, answer in answers.items():
+            detection = detected_part.get(question)
+            if detection is None:
+                errors.append(f"{part} question {question} is not present")
+            elif answer not in detection.fill_scores:
+                errors.append(
+                    f"{part} question {question} does not contain option {answer}"
+                )
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The answer key is incompatible with the automatically detected sheet: "
+                + "; ".join(errors[:8])
+                + ("." if len(errors) <= 8 else f"; and {len(errors) - 8} more.")
+            ),
+        )
+
+
+def _serialize_detections(detections: dict[str, Any]) -> dict[str, Any]:
+    """Expose every question and every dynamically available option."""
+    result: dict[str, Any] = {}
+    for part, questions in detections.items():
+        result[part] = {}
+        for question, detection in questions.items():
+            if detection.state == "multiple":
+                answer = "Multiple"
+            elif detection.state == "uncertain":
+                answer = "Uncertain"
+            else:
+                answer = detection.answer or "-"
+            result[part][question] = {
+                "answer": answer,
+                "state": detection.state,
+                "selected": list(detection.selected),
+                "confidence": detection.confidence,
+                "options": [
+                    {
+                        "label": option,
+                        "fill_score": score,
+                        "selected": option in detection.selected,
+                    }
+                    for option, score in detection.fill_scores.items()
+                ],
+            }
+    return result
 
 
 app = FastAPI(
@@ -221,9 +300,10 @@ def layout_metadata() -> dict[str, Any]:
         for layout_id, selected in processors.items()
     ]
     return {
-        "id": DEFAULT_LAYOUT_ID,
-        "name": processor.layout["name"],
-        "parts": _part_schema(),
+        "id": AUTO_LAYOUT_ID,
+        "name": "Automatic answer-sheet detection",
+        "mode": "automatic",
+        "parts": _part_schema(AUTO_LAYOUT_ID),
         "templates": templates,
     }
 
@@ -244,9 +324,12 @@ def list_tests() -> dict[str, Any]:
 
 @app.post("/api/tests", status_code=201)
 def create_test(payload: CreateTestRequest) -> dict[str, Any]:
-    counts = _validate_part_counts(payload.part_counts, payload.layout_id)
+    # Explicit layout ids from older clients remain valid for answer-key editing,
+    # but new clients use automatic detection and grading always detects visually.
+    layout_id = payload.layout_id or AUTO_LAYOUT_ID
+    counts = _validate_part_counts(payload.part_counts, layout_id)
     record = repository.create_test(
-        payload.name, counts, default_scoring, payload.layout_id
+        payload.name, counts, default_scoring, layout_id
     )
     return {"success": True, "test": _serialize_test(record)}
 
@@ -299,7 +382,7 @@ async def grade_student_sheet(
             config = json.loads(test_config_json)
             key_payload = AnswerKeyRequest.model_validate_json(answer_key_json)
             name = str(config["name"]).strip()
-            layout_id = str(config.get("layout_id", DEFAULT_LAYOUT_ID))
+            layout_id = str(config.get("layout_id") or AUTO_LAYOUT_ID)
             counts = _validate_part_counts(config["part_counts"], layout_id)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="The saved answer key is invalid.") from exc
@@ -337,7 +420,7 @@ async def grade_student_sheet(
         raise HTTPException(status_code=413, detail="The image must be 15 MB or smaller.")
 
     try:
-        source_image = processor.decode_image(data)
+        source_image = OMRProcessor.decode_image(data)
     except InvalidImageError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -350,13 +433,20 @@ async def grade_student_sheet(
 
     try:
         registration_image = qr_result.mask_for_alignment(source_image)
-        selected_processor = _processor_for_layout(
-            test.get("layout_id", DEFAULT_LAYOUT_ID)
+        automatic_match = auto_processor.detect_image(
+            source_image,
+            registration_image,
+            {
+                part: list(answers)
+                for part, answers in answer_key.items()
+            },
         )
-        omr = selected_processor.detect_image(source_image, registration_image)
+        selected_processor = automatic_match.processor
+        omr = automatic_match.read
     except LayoutDetectionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    _validate_key_for_detected_layout(answer_key, omr.detections)
     graded = grade_detections(omr.detections, answer_key, test["scoring"])
     annotated = annotate_results(
         omr.aligned_image, selected_processor.layout, graded["grading"]
@@ -387,11 +477,13 @@ async def grade_student_sheet(
         "success": True,
         "test": _serialize_test(test),
         "answer_key": answer_key,
+        "detected_answers": _serialize_detections(omr.detections),
         **graded,
         **qr_result.response_fields(),
         "alignment": {
-            "template_id": test.get("layout_id", DEFAULT_LAYOUT_ID),
-            "template_name": selected_processor.layout["name"],
+            "template_id": automatic_match.template_id,
+            "template_name": automatic_match.template_name,
+            "selection": "automatic",
             "method": omr.alignment.method,
             "matched_markers": omr.alignment.matched_markers,
             "expected_markers": omr.alignment.expected_markers,

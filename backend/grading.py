@@ -23,6 +23,7 @@ def grade_detections(
         "incorrect": 0,
         "unanswered": 0,
         "invalid": 0,
+        "uncertain": 0,
         "points": 0.0,
     }
 
@@ -35,14 +36,18 @@ def grade_detections(
             "incorrect": 0,
             "unanswered": 0,
             "invalid": 0,
+            "uncertain": 0,
             "points": 0.0,
         }
         for question, correct_answer in keyed_answers.items():
             detection = detections[part][question]
-            if detection.answer == "Multiple":
+            if detection.state == "multiple":
                 status = "invalid"
                 display_answer = "Multiple"
-            elif detection.answer is None:
+            elif detection.state == "uncertain":
+                status = "uncertain"
+                display_answer = "Uncertain"
+            elif detection.state == "blank":
                 status = "unanswered"
                 display_answer = "-"
             elif detection.answer == correct_answer:
@@ -70,7 +75,14 @@ def grade_detections(
         summaries[part] = counts
         aggregate["questions"] += counts["total"]
         aggregate["total"] += counts["total"]
-        for field in ("correct", "incorrect", "unanswered", "invalid", "points"):
+        for field in (
+            "correct",
+            "incorrect",
+            "unanswered",
+            "invalid",
+            "uncertain",
+            "points",
+        ):
             aggregate[field] += counts[field]
 
     aggregate["score"] = round(

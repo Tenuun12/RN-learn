@@ -36,7 +36,7 @@ def synthetic_school21_sheet() -> tuple[bytes, dict[str, dict[str, str]]]:
     return encoded.tobytes(), key
 
 
-def test_school21_template_is_selectable_and_grades_all_rows(tmp_path, monkeypatch) -> None:
+def test_school21_template_is_detected_automatically_and_grades_all_rows(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "repository", TestRepository(tmp_path / "tests.json"))
     client = TestClient(main.app)
 
@@ -51,13 +51,12 @@ def test_school21_template_is_selectable_and_grades_all_rows(tmp_path, monkeypat
         "/api/tests",
         json={
             "name": "School 21 test",
-            "layout_id": "school21_70_32_v1",
             "part_counts": {"part1": 70, "part2": 32},
         },
     )
     assert created.status_code == 201
     test_id = created.json()["test"]["id"]
-    assert created.json()["test"]["layout_id"] == "school21_70_32_v1"
+    assert created.json()["test"]["layout_id"] == "auto"
 
     image, answer_key = synthetic_school21_sheet()
     saved = client.post(f"/api/tests/{test_id}/answer-key", json=answer_key)
@@ -70,7 +69,18 @@ def test_school21_template_is_selectable_and_grades_all_rows(tmp_path, monkeypat
     assert graded.status_code == 200
     payload = graded.json()
     assert payload["alignment"]["template_id"] == "school21_70_32_v1"
+    assert payload["alignment"]["selection"] == "automatic"
     assert payload["alignment"]["method"] == "template-circle-grid"
+    assert len(payload["detected_answers"]["part1"]) == 70
+    assert len(payload["detected_answers"]["part2"]) == 32
+    assert [
+        option["label"]
+        for option in payload["detected_answers"]["part1"]["1"]["options"]
+    ] == ["A", "B", "C", "D", "E"]
+    assert [
+        option["label"]
+        for option in payload["detected_answers"]["part2"]["2.1a"]["options"]
+    ] == list("0123456789")
     assert payload["summary"]["total"]["questions"] == 102
     assert payload["summary"]["total"]["correct"] == 102
     assert payload["summary"]["total"]["score"] == 100.0
