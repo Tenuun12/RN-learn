@@ -9,3 +9,7 @@ class InvalidImageError(OMRError):
 class LayoutDetectionError(OMRError):
     """Raised when the configured answer sheet cannot be located."""
 
+
+class AlignmentConfidenceError(LayoutDetectionError):
+    """Raised when a sheet is recognized but cannot be aligned safely."""
+

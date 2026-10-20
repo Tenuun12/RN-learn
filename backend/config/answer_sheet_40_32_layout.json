@@ -1,0 +1,235 @@
+{
+  "id": "answer_sheet_40_32_v1",
+  "name": "RN Learn answer sheet - 40 + 32",
+  "image_width": 1249,
+  "image_height": 1725,
+  "notes": [
+    "Calibrated for the full RN Learn sheet with 40 Part 1 answers and 32 numeric answers.",
+    "Part 1 contains 40 A-E rows in two columns.",
+    "Part 2 contains four groups of eight rows with choices 0-9.",
+    "Four solid black corner markers are the primary alignment references."
+  ],
+  "alignment": {
+    "enabled": true,
+    "required": true,
+    "method": "corner-marker-homography",
+    "dark_threshold": 90,
+    "marker_targets": [
+      [
+        72,
+        63
+      ],
+      [
+        1177,
+        63
+      ],
+      [
+        1177,
+        1661
+      ],
+      [
+        72,
+        1661
+      ]
+    ],
+    "corner_zone_ratio": 0.28,
+    "minimum_marker_side_ratio": 0.012,
+    "maximum_marker_side_ratio": 0.075,
+    "minimum_marker_extent": 0.72,
+    "minimum_marker_quad_area_ratio": 0.55,
+    "maximum_marker_size_ratio": 2.5,
+    "minimum_alignment_confidence": 0.65,
+    "fallback_minimum_area_ratio": 0.35,
+    "recognition": {
+      "enabled": true,
+      "minimum_match_ratio": 0.72,
+      "hough_dp": 1,
+      "hough_min_distance": 12,
+      "hough_param1": 100,
+      "hough_param2": 18,
+      "minimum_radius": 8,
+      "maximum_radius": 15,
+      "maximum_center_distance": 5
+    },
+    "reference_priority": 100
+  },
+  "detection": {
+    "sample_radius": 9,
+    "center_search_radius": 2,
+    "illumination_kernel": 41,
+    "annotation_radius": 13,
+    "dark_pixel_threshold": 120,
+    "adaptive_dark_threshold": {
+      "enabled": false
+    },
+    "filled_threshold": 0.58,
+    "weak_filled_threshold": 0.38,
+    "minimum_score_margin": 0.18,
+    "empty_threshold": 0.25
+  },
+  "parts": {
+    "part1": {
+      "label": "Part 1",
+      "options": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E"
+      ],
+      "grids": [
+        {
+          "question_start": 1,
+          "count": 20,
+          "x_centers": [
+            158,
+            194,
+            230,
+            262,
+            298
+          ],
+          "y_start": 514.0,
+          "y_spacing": 40.0
+        },
+        {
+          "question_start": 21,
+          "count": 20,
+          "x_centers": [
+            396,
+            432,
+            466,
+            500,
+            535
+          ],
+          "y_start": 514.0,
+          "y_spacing": 40.0
+        }
+      ]
+    },
+    "part2": {
+      "label": "Part 2",
+      "options": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9"
+      ],
+      "grids": [
+        {
+          "question_labels": [
+            "2.1a",
+            "2.1b",
+            "2.1c",
+            "2.1d",
+            "2.1e",
+            "2.1f",
+            "2.1g",
+            "2.1h"
+          ],
+          "count": 8,
+          "x_centers": [
+            646,
+            699,
+            752,
+            805,
+            858,
+            911,
+            964,
+            1017,
+            1070,
+            1123
+          ],
+          "y_start": 538.0,
+          "y_spacing": 28.0
+        },
+        {
+          "question_labels": [
+            "2.2a",
+            "2.2b",
+            "2.2c",
+            "2.2d",
+            "2.2e",
+            "2.2f",
+            "2.2g",
+            "2.2h"
+          ],
+          "count": 8,
+          "x_centers": [
+            646,
+            699,
+            752,
+            805,
+            858,
+            911,
+            964,
+            1017,
+            1070,
+            1123
+          ],
+          "y_start": 808.0,
+          "y_spacing": 28.0
+        },
+        {
+          "question_labels": [
+            "2.3a",
+            "2.3b",
+            "2.3c",
+            "2.3d",
+            "2.3e",
+            "2.3f",
+            "2.3g",
+            "2.3h"
+          ],
+          "count": 8,
+          "x_centers": [
+            646,
+            699,
+            752,
+            805,
+            858,
+            911,
+            964,
+            1017,
+            1070,
+            1123
+          ],
+          "y_start": 1078.0,
+          "y_spacing": 28.0
+        },
+        {
+          "question_labels": [
+            "2.4a",
+            "2.4b",
+            "2.4c",
+            "2.4d",
+            "2.4e",
+            "2.4f",
+            "2.4g",
+            "2.4h"
+          ],
+          "count": 8,
+          "x_centers": [
+            646,
+            699,
+            752,
+            805,
+            858,
+            911,
+            964,
+            1017,
+            1070,
+            1123
+          ],
+          "y_start": 1348.0,
+          "y_spacing": 28.0
+        }
+      ]
+    }
+  }
+}

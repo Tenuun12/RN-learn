@@ -45,11 +45,14 @@ RUNTIME_DIR = Path(
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg"}
+DEFAULT_PART_COUNTS = {"part1": 40, "part2": 32}
 
 
 class CreateTestRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    part_counts: dict[str, int]
+    part_counts: dict[str, int] = Field(
+        default_factory=lambda: dict(DEFAULT_PART_COUNTS)
+    )
     layout_id: str = "auto"
 
 
@@ -162,15 +165,12 @@ def _validate_answer_key(
         expected = schema[part]["question_labels"][:count]
         allowed = set(schema[part]["options"])
         provided = submitted[part]
-        missing = [question for question in expected if question not in provided]
         extras = [question for question in provided if question not in expected]
         invalid = [
             question
             for question in expected
             if question in provided and provided[question] not in allowed
         ]
-        if missing:
-            errors.append(f"{schema[part]['label']} is missing: {', '.join(missing)}.")
         if extras:
             errors.append(f"{schema[part]['label']} has unexpected questions: {', '.join(extras)}.")
         if invalid:
@@ -179,34 +179,11 @@ def _validate_answer_key(
                 f"Allowed answers: {', '.join(schema[part]['options'])}."
             )
         cleaned[part] = {question: provided[question] for question in expected if question in provided}
+    if not any(cleaned[part] for part in ("part1", "part2")):
+        errors.append("Select at least one answer before saving the answer key.")
     if errors:
         raise HTTPException(status_code=422, detail=" ".join(errors))
     return cleaned
-
-
-def _validate_key_for_detected_layout(
-    answer_key: dict[str, dict[str, str]], detections: dict[str, Any]
-) -> None:
-    errors: list[str] = []
-    for part, answers in answer_key.items():
-        detected_part = detections.get(part, {})
-        for question, answer in answers.items():
-            detection = detected_part.get(question)
-            if detection is None:
-                errors.append(f"{part} question {question} is not present")
-            elif answer not in detection.fill_scores:
-                errors.append(
-                    f"{part} question {question} does not contain option {answer}"
-                )
-    if errors:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "The answer key is incompatible with the automatically detected sheet: "
-                + "; ".join(errors[:8])
-                + ("." if len(errors) <= 8 else f"; and {len(errors) - 8} more.")
-            ),
-        )
 
 
 def _serialize_detections(detections: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +280,7 @@ def layout_metadata() -> dict[str, Any]:
         "id": AUTO_LAYOUT_ID,
         "name": "Automatic answer-sheet detection",
         "mode": "automatic",
+        "default_part_counts": dict(DEFAULT_PART_COUNTS),
         "parts": _part_schema(AUTO_LAYOUT_ID),
         "templates": templates,
     }
@@ -383,7 +361,9 @@ async def grade_student_sheet(
             key_payload = AnswerKeyRequest.model_validate_json(answer_key_json)
             name = str(config["name"]).strip()
             layout_id = str(config.get("layout_id") or AUTO_LAYOUT_ID)
-            counts = _validate_part_counts(config["part_counts"], layout_id)
+            counts = _validate_part_counts(
+                config.get("part_counts", DEFAULT_PART_COUNTS), layout_id
+            )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="The saved answer key is invalid.") from exc
         if not name:
@@ -436,20 +416,18 @@ async def grade_student_sheet(
         automatic_match = auto_processor.detect_image(
             source_image,
             registration_image,
-            {
-                part: list(answers)
-                for part, answers in answer_key.items()
-            },
         )
         selected_processor = automatic_match.processor
         omr = automatic_match.read
     except LayoutDetectionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    _validate_key_for_detected_layout(answer_key, omr.detections)
     graded = grade_detections(omr.detections, answer_key, test["scoring"])
     annotated = annotate_results(
-        omr.aligned_image, selected_processor.layout, graded["grading"]
+        omr.aligned_image,
+        selected_processor.layout,
+        graded["grading"],
+        omr.detections,
     )
     result_id = uuid4().hex
     output_path = RUNTIME_DIR / f"{result_id}.png"

@@ -14,6 +14,9 @@ COLORS = {
     "unanswered": (31, 184, 230),
     "invalid": (22, 125, 245),
     "uncertain": (196, 114, 52),
+    "not_graded": (150, 105, 80),
+    "not-graded": (150, 105, 80),
+    "not-present": (150, 105, 80),
 }
 
 
@@ -21,17 +24,23 @@ def annotate_results(
     image: np.ndarray,
     layout: dict[str, Any],
     results: dict[str, dict[str, dict[str, Any]]],
+    detections: dict[str, dict[str, Any]] | None = None,
 ) -> np.ndarray:
     annotated = image.copy()
     radius = int(layout["detection"].get("annotation_radius", 11))
     for part, questions in questions_by_part(layout).items():
         for question in questions:
-            if question.question not in results.get(part, {}):
-                continue
-            item = results[part][question.question]
-            status = item["status"]
+            item = results.get(part, {}).get(question.question)
+            if item is not None:
+                status = item["status"]
+                selected = set(item.get("selected", []))
+            else:
+                detection = (detections or {}).get(part, {}).get(question.question)
+                if detection is None or not detection.selected:
+                    continue
+                status = "not_graded"
+                selected = set(detection.selected)
             color = COLORS[status]
-            selected = set(item.get("selected", []))
             if selected:
                 targets = [bubble for bubble in question.bubbles if bubble.option in selected]
             else:

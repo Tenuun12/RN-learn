@@ -33,6 +33,22 @@ def synthetic_unknown_sheet() -> tuple[bytes, dict[str, dict[str, str]]]:
     return encoded.tobytes(), key
 
 
+def synthetic_partially_filled_sheet() -> bytes:
+    image = np.full((600, 800, 3), 255, dtype=np.uint8)
+    for xs, ys, selected_rows in [
+        ([80, 110, 140, 170, 200], [120, 150, 180, 210], {0: [1], 3: [0, 2]}),
+        ([350, 390, 430, 470, 510, 550, 590], [330, 365, 400], {0: [3]}),
+    ]:
+        for row, y in enumerate(ys):
+            for x in xs:
+                cv2.circle(image, (x, y), 10, (20, 70, 130), 2, cv2.LINE_AA)
+            for option in selected_rows.get(row, []):
+                cv2.circle(image, (xs[option], y), 8, (0, 0, 0), -1, cv2.LINE_AA)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
 def test_unknown_bubble_sheet_uses_template_free_fallback(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "repository", TestRepository(tmp_path / "tests.json"))
     client = TestClient(main.app)
@@ -64,3 +80,43 @@ def test_unknown_bubble_sheet_uses_template_free_fallback(tmp_path, monkeypatch)
     assert payload["summary"]["total"]["correct"] == 7
     assert len(payload["detected_answers"]["part1"]["1"]["options"]) == 5
     assert len(payload["detected_answers"]["part2"]["2.1a"]["options"]) == 7
+
+
+def test_all_detected_rows_survive_key_length_mismatch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "repository", TestRepository(tmp_path / "tests.json"))
+    client = TestClient(main.app)
+    created = client.post(
+        "/api/tests",
+        json={
+            "name": "Partial answer key",
+            "part_counts": {"part1": 5, "part2": 4},
+        },
+    )
+    test_id = created.json()["test"]["id"]
+    answer_key = {
+        "part1": {"1": "B", "5": "A"},
+        "part2": {"2.1a": "3", "2.1d": "0"},
+    }
+    assert client.post(f"/api/tests/{test_id}/answer-key", json=answer_key).status_code == 200
+
+    response = client.post(
+        f"/api/tests/{test_id}/grade",
+        files={
+            "image": (
+                "partial.png",
+                synthetic_partially_filled_sheet(),
+                "image/png",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["detected_answers"]["part1"]) == 4
+    assert len(payload["detected_answers"]["part2"]) == 3
+    assert payload["detected_answers"]["part1"]["2"]["state"] == "blank"
+    assert payload["detected_answers"]["part1"]["4"]["state"] == "multiple"
+    assert payload["grading"]["part1"]["5"]["status"] == "not-present"
+    assert payload["grading"]["part1"]["3"]["status"] == "not-graded"
+    assert payload["grading_coverage"]["part1"]["key_questions_not_detected"] == ["5"]
+    assert payload["summary"]["total"]["questions"] == 2

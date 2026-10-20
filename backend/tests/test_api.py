@@ -45,11 +45,19 @@ def test_complete_teacher_workflow(tmp_path, monkeypatch) -> None:
     assert created.json()["test"]["layout_id"] == "auto"
     test_id = created.json()["test"]["id"]
 
-    missing = client.post(
+    partial_key = {"part1": {"1": "B"}, "part2": {"2.1a": "8"}}
+    partial = client.post(
         f"/api/tests/{test_id}/answer-key",
-        json={"part1": {"1": "B"}, "part2": {"2.1a": "8"}},
+        json=partial_key,
     )
-    assert missing.status_code == 422
+    assert partial.status_code == 200
+    assert partial.json()["answer_key"] == partial_key
+
+    empty = client.post(
+        f"/api/tests/{test_id}/answer-key",
+        json={"part1": {}, "part2": {}},
+    )
+    assert empty.status_code == 422
 
     answer_key = {
         "part1": {"1": "B", "2": "B", "3": "D"},
@@ -74,7 +82,19 @@ def test_complete_teacher_workflow(tmp_path, monkeypatch) -> None:
     assert payload["answer_key"] == answer_key
     assert payload["alignment"]["selection"] == "automatic"
     assert payload["alignment"]["template_id"] == "legacy_red_60_30_v1"
-    assert payload["student_answers"]["part1"] == {"1": "B", "2": "A", "3": "D"}
+    assert len(payload["student_answers"]["part1"]) == 60
+    assert len(payload["student_answers"]["part2"]) == 30
+    assert {
+        question: payload["student_answers"]["part1"][question]
+        for question in ("1", "2", "3")
+    } == {"1": "B", "2": "A", "3": "D"}
+    assert len(payload["grading"]["part1"]) == 60
+    assert len(payload["grading"]["part2"]) == 30
+    assert {
+        question: payload["grading"]["part1"][question]["status"]
+        for question in ("1", "2", "3")
+    } == {"1": "correct", "2": "incorrect", "3": "correct"}
+    assert payload["grading"]["part1"]["4"]["status"] == "not-graded"
     assert len(payload["detected_answers"]["part1"]) == 60
     assert len(payload["detected_answers"]["part2"]) == 30
     assert [

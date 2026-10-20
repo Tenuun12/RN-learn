@@ -14,6 +14,8 @@ const STATUS_LABELS = {
   unanswered: "Unanswered",
   invalid: "Multiple",
   uncertain: "Uncertain",
+  "not-graded": "Not graded",
+  "not-present": "Not detected",
 };
 const SAVED_KEYS_STORAGE = "omr-teacher-answer-keys-v1";
 
@@ -63,9 +65,8 @@ function StepRail({ stage }) {
   );
 }
 
-function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy, setError }) {
+function CreateTest({ savedKeys, onChooseSaved, onCreated, busy, setBusy, setError }) {
   const [name, setName] = useState("");
-  const [counts, setCounts] = useState({ part1: 20, part2: 20 });
 
   async function submit(event) {
     event.preventDefault();
@@ -75,7 +76,7 @@ function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy
       const payload = await api("/api/tests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, part_counts: counts }),
+        body: JSON.stringify({ name }),
       });
       onCreated(payload.test);
     } catch (error) {
@@ -114,7 +115,7 @@ function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy
       <div className="section-intro">
         <span className="eyebrow">Create test</span>
         <h1>Set up the answer key</h1>
-        <p>Name the test and choose how many answer rows are graded. The sheet format and available choices are detected automatically from the upload.</p>
+        <p>Name the test and enter its answer key. Uploaded sheets are detected independently of the key length.</p>
       </div>
       <form onSubmit={submit}>
         <label className="field wide">
@@ -123,22 +124,7 @@ function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy
         </label>
         <div className="auto-detection-note">
           <strong>Automatic sheet detection</strong>
-          <span>No template selection is required. Every installed layout is tested against the uploaded image.</span>
-        </div>
-        <div className="count-grid">
-          {["part1", "part2"].map((part) => (
-            <label className="field" key={part}>
-              <span>{PART_TITLES[part]} questions</span>
-              <input
-                type="number"
-                min="0"
-                max={layout.parts[part].maximum_questions}
-                value={counts[part]}
-                onChange={(event) => setCounts({ ...counts, [part]: Number(event.target.value) })}
-              />
-              <small>Maximum {layout.parts[part].maximum_questions} across detected formats</small>
-            </label>
-          ))}
+          <span>The latest template starts with 40 Part 1 and 32 Part 2 key rows. Every detected answer row is returned, even when it is not in the key.</span>
         </div>
         <div className="form-footer">
           <div className="secure-note"><span>01</span> Teacher answers become the only grading source of truth.</div>
@@ -152,7 +138,6 @@ function CreateTest({ layout, savedKeys, onChooseSaved, onCreated, busy, setBusy
 
 function PartKeyEditor({ part, schema, values, onChange }) {
   const answered = schema.question_labels.filter((question) => values[question]).length;
-  const firstMissing = schema.question_labels.find((question) => !values[question]);
   const completion = schema.question_count ? 100 * answered / schema.question_count : 100;
   return (
     <section className="key-part">
@@ -181,9 +166,9 @@ function PartKeyEditor({ part, schema, values, onChange }) {
           </div>
         ))}
       </div>
-      <p className={`validation-line ${firstMissing ? "pending" : "valid"}`}>
-        <span>{firstMissing ? "!" : "✓"}</span>
-        {firstMissing ? `${PART_TITLES[part]} question ${firstMissing} has no correct answer.` : `${PART_TITLES[part]}: all ${schema.question_count} answers entered.`}
+      <p className={`validation-line ${answered ? "valid" : "pending"}`}>
+        <span>{answered ? "✓" : "!"}</span>
+        {answered ? `${answered} selected. Unanswered rows will not be graded.` : `Select any ${PART_TITLES[part]} answers you want to grade.`}
       </p>
     </section>
   );
@@ -194,16 +179,24 @@ function AnswerKeyEditor({ test, initialKey, onSaved, busy, setBusy, setError })
     part1: { ...(initialKey?.part1 || {}) },
     part2: { ...(initialKey?.part2 || {}) },
   }));
-  const complete = ["part1", "part2"].every((part) =>
-    test.parts[part].question_labels.every((question) => key[part][question]),
+  const answeredCount = ["part1", "part2"].reduce(
+    (total, part) => total + test.parts[part].question_labels.filter((question) => key[part][question]).length,
+    0,
   );
+  const totalQuestions = test.parts.part1.question_count + test.parts.part2.question_count;
+  const complete = answeredCount === totalQuestions;
 
   function update(part, question, answer) {
-    setKey((current) => ({ ...current, [part]: { ...current[part], [question]: answer } }));
+    setKey((current) => {
+      const nextPart = { ...current[part] };
+      if (nextPart[question] === answer) delete nextPart[question];
+      else nextPart[question] = answer;
+      return { ...current, [part]: nextPart };
+    });
   }
 
   async function save() {
-    if (!complete) return;
+    if (!answeredCount) return;
     setBusy(true);
     setError("");
     try {
@@ -228,7 +221,7 @@ function AnswerKeyEditor({ test, initialKey, onSaved, busy, setBusy, setError })
       <div className="section-intro compact">
         <span className="eyebrow">{initialKey ? "Edit answer key" : "Create answer key"}</span>
         <h1>{test.name}</h1>
-        <p>Select exactly one correct answer for every configured row. Options mirror the actual calibrated OMR sheet.</p>
+        <p>Select the questions you want to grade. Unanswered key rows are skipped.</p>
       </div>
       <div className="key-grid">
         {["part1", "part2"].map((part) => (
@@ -242,8 +235,8 @@ function AnswerKeyEditor({ test, initialKey, onSaved, busy, setBusy, setError })
         ))}
       </div>
       <div className="sticky-actions">
-        <div><strong>{complete ? "Answer key complete" : "Complete every question to continue"}</strong><span>{complete ? "Ready to save and grade students." : "Missing answers are marked beneath each part."}</span></div>
-        <button className="primary-button" disabled={!complete || busy} onClick={save}>{busy ? "Saving…" : initialKey ? "Save changes" : "Save answer key"}<b>→</b></button>
+        <div><strong>{complete ? "All questions selected" : `${answeredCount} questions selected`}</strong><span>{answeredCount ? "Save now and grade only the selected questions." : "Select at least one answer to continue."}</span></div>
+        <button className="primary-button" disabled={!answeredCount || busy} onClick={save}>{busy ? "Saving…" : initialKey ? "Save changes" : "Save answer key"}<b>→</b></button>
       </div>
     </section>
   );
@@ -351,9 +344,29 @@ function AnswerTable({ part, rows }) {
     <section className="answer-panel">
       <div className="panel-heading"><div><span className="eyebrow">Answer comparison</span><h2>{PART_TITLES[part]}</h2></div><span className="pill">{Object.keys(rows).length} questions</span></div>
       <div className="table-wrap"><table><thead><tr><th>Question</th><th>Teacher key</th><th>Student OMR</th><th>Result</th><th>Confidence</th></tr></thead><tbody>
-        {Object.entries(rows).map(([question, item]) => <tr key={question}><td className="question">{question}</td><td><span className="answer-chip teacher">{item.correct_answer}</span></td><td><span className="answer-chip">{item.student}</span></td><td><span className={`status ${item.status}`}><i />{STATUS_LABELS[item.status]}</span></td><td className="confidence">{Math.round(item.confidence * 100)}%</td></tr>)}
+        {Object.entries(rows).map(([question, item]) => <tr key={question}><td className="question">{question}</td><td><span className="answer-chip teacher">{item.correct_answer || "—"}</span></td><td><span className="answer-chip">{item.student}</span></td><td><span className={`status ${item.status}`}><i />{STATUS_LABELS[item.status]}</span></td><td className="confidence">{Math.round(item.confidence * 100)}%</td></tr>)}
       </tbody></table></div>
     </section>
+  );
+}
+
+function allAnswerRows(data, part) {
+  const grading = data.grading[part] || {};
+  const detected = data.detected_answers[part] || {};
+  const questions = [
+    ...Object.keys(detected),
+    ...Object.keys(grading).filter((question) => !detected[question]),
+  ];
+  return Object.fromEntries(
+    questions.map((question) => [
+      question,
+      grading[question] || {
+        correct_answer: "—",
+        student: detected[question]?.answer || "-",
+        status: "not-graded",
+        confidence: detected[question]?.confidence || 0,
+      },
+    ]),
   );
 }
 
@@ -408,15 +421,20 @@ function Results({ data, onAnother, onEdit }) {
     ? "template bubbles matched"
     : data.alignment.method === "generic-bubble-grid"
       ? "bubble grid discovered"
-      : "registration markers aligned";
+      : data.alignment.method === "document-boundary-homography"
+        ? "document boundary aligned"
+        : data.alignment.method === "corner-marker-homography"
+          ? "corner markers aligned"
+          : "registration markers aligned";
   return (
     <section className="results">
       <div className="results-heading"><div><span className="eyebrow">Grading complete</span><h1>{data.test.name}</h1><p>Teacher key compared against detected student marks. Sheet format: {data.alignment.template_name} (automatically detected).</p><span className={`alignment-detail ${data.alignment.confidence < 0.7 ? "review" : ""}`}>{data.alignment.matched_markers}/{data.alignment.expected_markers} {alignmentLabel} · {data.alignment.confidence >= 0.7 ? "High-confidence fit" : "Review alignment"}</span></div><div className="heading-actions"><button className="secondary-button" onClick={onEdit}>Edit key</button><button className="primary-button" onClick={onAnother}>Grade another student</button></div></div>
       <div className="score-grid"><ScoreCard title="Part 1" summary={data.summary.part1} /><ScoreCard title="Part 2" summary={data.summary.part2} tone="blue" /><ScoreCard title="Total score" summary={data.summary.total} tone="dark" /></div>
+      {Object.values(data.grading_coverage || {}).some((coverage) => coverage.detected_without_key?.length || coverage.key_questions_not_detected?.length) && <div className="auto-detection-note grading-coverage"><strong>Answer key coverage</strong><span>{Object.values(data.grading_coverage || {}).reduce((total, coverage) => total + (coverage.detected_without_key?.length || 0), 0)} detected answers have no key; {Object.values(data.grading_coverage || {}).reduce((total, coverage) => total + (coverage.key_questions_not_detected?.length || 0), 0)} key questions were not detected on the sheet. All detected rows are listed below.</span></div>}
       <QRResult data={data} />
-      <section className="visual-panel"><div className="panel-heading"><div><span className="eyebrow">Detection overlay</span><h2>Visual verification</h2></div><div className="legend"><span className="correct">Correct</span><span className="incorrect">Incorrect</span><span className="unanswered">Blank</span><span className="invalid">Multiple</span><span className="uncertain">Uncertain</span></div></div><div className={`visual-content ${qrPreviewUrls.length ? "with-qr" : ""}`}><a className="visual-overlay" href={annotatedUrl} target="_blank" rel="noreferrer"><img src={annotatedUrl} alt="Student OMR with grading annotations" /></a>{qrPreviewUrls.length > 0 && <aside className="qr-preview"><span className="eyebrow">From original upload</span><h3>Detected QR {qrPreviewUrls.length > 1 ? "codes" : "code"}</h3>{qrPreviewUrls.map((url, index) => <img src={url} alt={`Detected QR code ${index + 1}`} key={index} />)}<small>The QR is shown separately so it cannot shift the calibrated OMR overlay.</small></aside>}</div></section>
-      <AnswerTable part="part1" rows={data.grading.part1} />
-      <AnswerTable part="part2" rows={data.grading.part2} />
+      <section className="visual-panel"><div className="panel-heading"><div><span className="eyebrow">Detection overlay</span><h2>Visual verification</h2></div><div className="legend"><span className="correct">Correct</span><span className="incorrect">Incorrect</span><span className="unanswered">Blank</span><span className="invalid">Multiple</span><span className="uncertain">Uncertain</span><span className="not-graded">Detected only</span></div></div><div className={`visual-content ${qrPreviewUrls.length ? "with-qr" : ""}`}><a className="visual-overlay" href={annotatedUrl} target="_blank" rel="noreferrer"><img src={annotatedUrl} alt="Student OMR with grading annotations" /></a>{qrPreviewUrls.length > 0 && <aside className="qr-preview"><span className="eyebrow">From original upload</span><h3>Detected QR {qrPreviewUrls.length > 1 ? "codes" : "code"}</h3>{qrPreviewUrls.map((url, index) => <img src={url} alt={`Detected QR code ${index + 1}`} key={index} />)}<small>The QR is shown separately so it cannot shift the calibrated OMR overlay.</small></aside>}</div></section>
+      <AnswerTable part="part1" rows={allAnswerRows(data, "part1")} />
+      <AnswerTable part="part2" rows={allAnswerRows(data, "part2")} />
     </section>
   );
 }
@@ -554,7 +572,7 @@ export default function App() {
       </header>
       <div className="page-shell">
         {error && <div className="error-banner" role="alert"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
-        {stage === "create" && <CreateTest layout={layout} savedKeys={savedKeys} onChooseSaved={chooseSavedKey} onCreated={created} busy={busy} setBusy={setBusy} setError={setError} />}
+        {stage === "create" && <CreateTest savedKeys={savedKeys} onChooseSaved={chooseSavedKey} onCreated={created} busy={busy} setBusy={setBusy} setError={setError} />}
         {stage === "key" && activeTest && <AnswerKeyEditor test={activeTest} initialKey={answerKey} onSaved={saved} busy={busy} setBusy={setBusy} setError={setError} />}
         {stage === "upload" && activeTest && <UploadStage test={activeTest} answerKey={answerKey} onEdit={() => setStage("key")} onGraded={(payload) => { setResult(payload); setStage("results"); window.scrollTo({ top: 0, behavior: "smooth" }); }} busy={busy} setBusy={setBusy} setError={setError} />}
         {stage === "results" && result && <Results data={result} onAnother={() => setStage("upload")} onEdit={() => setStage("key")} />}

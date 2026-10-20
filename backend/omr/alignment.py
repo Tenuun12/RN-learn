@@ -6,7 +6,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .errors import LayoutDetectionError
+from .errors import AlignmentConfidenceError, LayoutDetectionError
 from .layout import iter_questions
 
 
@@ -17,6 +17,230 @@ class AlignmentResult:
     expected_markers: int
     confidence: float
     method: str
+
+
+def _order_quad(points: np.ndarray) -> np.ndarray:
+    """Return four points in top-left, top-right, bottom-right, bottom-left order."""
+    points = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    ordered = np.empty((4, 2), dtype=np.float32)
+    sums = points.sum(axis=1)
+    differences = np.diff(points, axis=1).ravel()
+    ordered[0] = points[int(np.argmin(sums))]
+    ordered[2] = points[int(np.argmax(sums))]
+    ordered[1] = points[int(np.argmin(differences))]
+    ordered[3] = points[int(np.argmax(differences))]
+    return ordered
+
+
+def _corner_marker_candidates(
+    image: np.ndarray, config: dict[str, Any]
+) -> list[tuple[float, float, float, float]]:
+    """Find compact, solid black rectangles near the four page corners."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    threshold = int(config.get("dark_threshold", 90))
+    _, mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY_INV)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    height, width = gray.shape
+    minimum_side = min(height, width) * float(
+        config.get("minimum_marker_side_ratio", 0.012)
+    )
+    maximum_side = min(height, width) * float(
+        config.get("maximum_marker_side_ratio", 0.075)
+    )
+    minimum_extent = float(config.get("minimum_marker_extent", 0.72))
+    candidates: list[tuple[float, float, float, float]] = []
+    for contour in contours:
+        x, y, box_width, box_height = cv2.boundingRect(contour)
+        short_side = min(box_width, box_height)
+        long_side = max(box_width, box_height)
+        if short_side < minimum_side or long_side > maximum_side:
+            continue
+        area = float(cv2.contourArea(contour))
+        extent = area / max(float(box_width * box_height), 1.0)
+        aspect = box_width / max(float(box_height), 1.0)
+        perimeter = float(cv2.arcLength(contour, True))
+        approximation = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
+        hull_area = float(cv2.contourArea(cv2.convexHull(contour)))
+        solidity = area / max(hull_area, 1.0)
+        if not (
+            0.62 <= aspect <= 1.62
+            and extent >= minimum_extent
+            and solidity >= 0.88
+            and len(approximation) == 4
+            and cv2.isContourConvex(approximation)
+        ):
+            continue
+        center, size, _ = cv2.minAreaRect(contour)
+        marker_area = max(float(size[0] * size[1]), 1.0)
+        candidates.append((float(center[0]), float(center[1]), marker_area, extent))
+    return candidates
+
+
+def _select_corner_markers(
+    image: np.ndarray, config: dict[str, Any]
+) -> tuple[np.ndarray | None, int, float]:
+    candidates = _corner_marker_candidates(image, config)
+    height, width = image.shape[:2]
+    zone = float(config.get("corner_zone_ratio", 0.28))
+    corners = (
+        (0.0, 0.0, lambda x, y: x <= width * zone and y <= height * zone),
+        (float(width), 0.0, lambda x, y: x >= width * (1 - zone) and y <= height * zone),
+        (
+            float(width),
+            float(height),
+            lambda x, y: x >= width * (1 - zone) and y >= height * (1 - zone),
+        ),
+        (
+            0.0,
+            float(height),
+            lambda x, y: x <= width * zone and y >= height * (1 - zone),
+        ),
+    )
+    selected: list[tuple[float, float, float, float]] = []
+    diagonal = max(float(np.hypot(width, height)), 1.0)
+    for corner_x, corner_y, inside in corners:
+        available = [candidate for candidate in candidates if inside(candidate[0], candidate[1])]
+        if not available:
+            continue
+        selected.append(
+            min(
+                available,
+                key=lambda item: (
+                    np.hypot(item[0] - corner_x, item[1] - corner_y) / diagonal
+                    + (1.0 - item[3]) * 0.25
+                ),
+            )
+        )
+    if len(selected) != 4:
+        return None, len(selected), 0.0
+
+    points = np.float32([(item[0], item[1]) for item in selected])
+    areas = [item[2] for item in selected]
+    extents = [item[3] for item in selected]
+    quadrilateral_area = abs(float(cv2.contourArea(points)))
+    image_area = float(width * height)
+    area_ratio = quadrilateral_area / max(image_area, 1.0)
+    size_ratio = max(areas) / max(min(areas), 1.0)
+    minimum_area = float(config.get("minimum_marker_quad_area_ratio", 0.55))
+    maximum_size_ratio = float(config.get("maximum_marker_size_ratio", 2.5))
+    if (
+        area_ratio < minimum_area
+        or size_ratio > maximum_size_ratio
+        or not cv2.isContourConvex(points)
+    ):
+        return None, 4, 0.0
+    coverage_score = min(1.0, area_ratio / max(minimum_area, 0.001))
+    size_score = min(1.0, maximum_size_ratio / max(size_ratio, 0.001))
+    confidence = float(np.mean(extents)) * coverage_score * size_score
+    return points, 4, confidence
+
+
+def _document_boundary(
+    image: np.ndarray, config: dict[str, Any]
+) -> tuple[np.ndarray | None, float]:
+    """Locate a visible sheet boundary when one or more corner markers are obscured."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 40, 120)
+    edges = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+        iterations=2,
+    )
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    image_area = float(gray.shape[0] * gray.shape[1])
+    minimum_area_ratio = float(config.get("fallback_minimum_area_ratio", 0.35))
+    best: tuple[float, np.ndarray, float] | None = None
+    for contour in contours:
+        area = abs(float(cv2.contourArea(contour)))
+        area_ratio = area / max(image_area, 1.0)
+        if area_ratio < minimum_area_ratio:
+            continue
+        perimeter = float(cv2.arcLength(contour, True))
+        approximation = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+        if len(approximation) != 4 or not cv2.isContourConvex(approximation):
+            continue
+        points = _order_quad(approximation[:, 0, :])
+        rectangularity = area / max(abs(float(cv2.contourArea(points))), 1.0)
+        confidence = min(1.0, area_ratio / 0.75) * min(1.0, rectangularity)
+        score = area_ratio * confidence
+        if best is None or score > best[0]:
+            best = (score, points, confidence)
+    if best is None:
+        return None, 0.0
+    return best[1], best[2]
+
+
+def _corner_homography(
+    image: np.ndarray,
+    marker_image: np.ndarray,
+    layout: dict[str, Any],
+    config: dict[str, Any],
+    validate_bubble_grid: bool = True,
+) -> AlignmentResult:
+    width = int(layout["image_width"])
+    height = int(layout["image_height"])
+    source, marker_count, confidence = _select_corner_markers(marker_image, config)
+    method = "corner-marker-homography"
+    if source is not None:
+        target = np.float32(config["marker_targets"])
+        if target.shape != (4, 2):
+            raise ValueError("corner-marker alignment requires four marker_targets")
+    else:
+        boundary, boundary_confidence = _document_boundary(marker_image, config)
+        if boundary is None:
+            message = (
+                f"Only {marker_count} of 4 corner markers were detected, and the document "
+                "boundary could not be recovered reliably. Retake the photo with all four "
+                "black corner markers and the full page visible."
+                if marker_count
+                else "The four black corner markers and document boundary could not be detected reliably."
+            )
+            error_type = AlignmentConfidenceError if marker_count else LayoutDetectionError
+            raise error_type(message)
+        source = boundary
+        target = np.float32(
+            [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]]
+        )
+        confidence = boundary_confidence
+        method = "document-boundary-homography"
+
+    minimum_confidence = float(config.get("minimum_alignment_confidence", 0.65))
+    if confidence < minimum_confidence:
+        raise AlignmentConfidenceError(
+            "The answer sheet was found, but alignment confidence is too low. "
+            "Retake the photo with the full page and corner markers visible."
+        )
+    matrix = cv2.getPerspectiveTransform(np.float32(source), target)
+    if not np.isfinite(matrix).all() or abs(float(np.linalg.det(matrix))) < 1e-9:
+        raise AlignmentConfidenceError("The detected answer sheet perspective is degenerate.")
+    aligned = cv2.warpPerspective(
+        image,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    recognition = config.get("recognition", {})
+    if validate_bubble_grid and recognition.get("enabled", False):
+        matched_bubbles, expected_bubbles = _circle_grid_match(aligned, layout, config)
+        bubble_confidence = matched_bubbles / max(expected_bubbles, 1)
+        if bubble_confidence < float(recognition.get("minimum_match_ratio", 0.72)):
+            raise AlignmentConfidenceError(
+                "The corner markers were found, but the answer regions did not align "
+                "with the expected sheet. Check that the full answer sheet is visible."
+            )
+        confidence = min(confidence, bubble_confidence)
+    return AlignmentResult(
+        aligned,
+        marker_count,
+        4,
+        min(1.0, confidence),
+        method,
+    )
 
 
 def _expected_markers(config: dict[str, Any]) -> list[tuple[float, float]]:
@@ -254,13 +478,23 @@ def align_image(
     image: np.ndarray,
     layout: dict[str, Any],
     registration_image: np.ndarray | None = None,
+    *,
+    validate_bubble_grid: bool = True,
 ) -> AlignmentResult:
     width = int(layout["image_width"])
     height = int(layout["image_height"])
     resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
     marker_source = registration_image if registration_image is not None else image
-    marker_image = cv2.resize(marker_source, (width, height), interpolation=cv2.INTER_AREA)
     config = layout.get("alignment", {})
+    if config.get("method") == "corner-marker-homography":
+        return _corner_homography(
+            image,
+            marker_source,
+            layout,
+            config,
+            validate_bubble_grid=validate_bubble_grid,
+        )
+    marker_image = cv2.resize(marker_source, (width, height), interpolation=cv2.INTER_AREA)
     if not config.get("enabled", True):
         recognition = config.get("recognition", {})
         if recognition.get("enabled", False):

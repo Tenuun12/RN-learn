@@ -89,7 +89,30 @@ def _bubble_candidates(image: np.ndarray) -> tuple[list[BubbleCandidate], float]
         for item in candidates
         if dominant_diameter * 0.75 <= item.diameter <= dominant_diameter * 1.30
     ]
-    return filtered, float(dominant_diameter)
+    diameter = float(dominant_diameter)
+
+    # Some printed groups alternate shaded row backgrounds. Contour extraction
+    # can miss the pale outlines in those rows, so add circle centers from a
+    # second detector before inferring the grid's row count.
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=max(5, round(diameter * 0.62)),
+        param1=100,
+        param2=18,
+        minRadius=max(2, round(diameter * 0.27)),
+        maxRadius=max(3, round(diameter * 0.62)),
+    )
+    if circles is not None:
+        filtered = _deduplicate(
+            filtered
+            + [
+                BubbleCandidate(float(x), float(y), float(radius * 2))
+                for x, y, radius in circles[0]
+            ]
+        )
+    return filtered, diameter
 
 
 def _cluster_axis(
