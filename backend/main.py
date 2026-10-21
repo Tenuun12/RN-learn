@@ -456,6 +456,16 @@ async def grade_student_sheet(
         "test": _serialize_test(test),
         "answer_key": answer_key,
         "detected_answers": _serialize_detections(omr.detections),
+        "variant": (
+            None
+            if not omr.fields or "variant" not in omr.fields
+            else {
+                "answer": omr.fields["variant"].answer,
+                "state": omr.fields["variant"].state,
+                "selected": list(omr.fields["variant"].selected),
+                "confidence": omr.fields["variant"].confidence,
+            }
+        ),
         **graded,
         **qr_result.response_fields(),
         "alignment": {

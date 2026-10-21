@@ -67,6 +67,14 @@
     "minimum_score_margin": 0.18,
     "empty_threshold": 0.25
   },
+  "fields": {
+    "variant": {
+      "label": "Хувилбар",
+      "options": ["A", "B", "C", "D"],
+      "x_center": 675,
+      "y_centers": [254, 299, 344, 389]
+    }
+  },
   "parts": {
     "part1": {
       "label": "Part 1",

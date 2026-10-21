@@ -10,7 +10,7 @@ import numpy as np
 
 from .alignment import AlignmentResult, align_image
 from .config import discover_layout_paths, load_layout
-from .detector import Detection, detect_answers
+from .detector import Detection, detect_answers, detect_fields
 from .errors import AlignmentConfidenceError, InvalidImageError, LayoutDetectionError
 from .generic import detect_generic_layout
 from .layout import iter_questions
@@ -21,6 +21,7 @@ class OMRReadResult:
     aligned_image: np.ndarray
     detections: dict[str, dict[str, Detection]]
     alignment: AlignmentResult
+    fields: dict[str, Detection] | None = None
 
     def public_answers(self) -> dict[str, dict[str, str]]:
         return {
@@ -61,7 +62,8 @@ class OMRProcessor:
     ) -> OMRReadResult:
         alignment = align_image(image, self.layout, registration_image)
         detections = detect_answers(alignment.image, self.layout)
-        return OMRReadResult(alignment.image, detections, alignment)
+        fields = detect_fields(alignment.image, self.layout)
+        return OMRReadResult(alignment.image, detections, alignment, fields)
 
 
 @dataclass(frozen=True)
@@ -228,6 +230,12 @@ class AutoOMRProcessor:
                 discovered_layout = _merge_discovered_rows(
                     best.processor.layout, discovered.layout
                 ) or discovered.layout
+                # The image is already rectified to the selected template's
+                # coordinate system. Keep its non-graded metadata fields even
+                # when the discovered answer rows cannot be merged.
+                discovered_layout.setdefault(
+                    "fields", deepcopy(best.processor.layout.get("fields", {}))
+                )
                 processor = OMRProcessor(discovered_layout)
                 detections = detect_answers(discovered.image, discovered_layout)
                 return AutoOMRReadResult(
@@ -235,7 +243,10 @@ class AutoOMRProcessor:
                     str(discovered_layout["name"]),
                     processor,
                     OMRReadResult(
-                        discovered.image, detections, discovered.alignment
+                        discovered.image,
+                        detections,
+                        discovered.alignment,
+                        detect_fields(discovered.image, discovered_layout),
                     ),
                 )
             return best
@@ -272,6 +283,11 @@ class AutoOMRProcessor:
                     dynamic_layout = _merge_discovered_rows(
                         reference.layout, generic.layout
                     ) or generic.layout
+                    # `rectified.image` uses the reference layout's canonical
+                    # coordinates, so its field calibration remains valid.
+                    dynamic_layout.setdefault(
+                        "fields", deepcopy(reference.layout.get("fields", {}))
+                    )
                     processor = OMRProcessor(dynamic_layout)
                     detections = detect_answers(generic.image, dynamic_layout)
                     return AutoOMRReadResult(
@@ -279,7 +295,10 @@ class AutoOMRProcessor:
                         str(dynamic_layout["name"]),
                         processor,
                         OMRReadResult(
-                            generic.image, detections, generic.alignment
+                            generic.image,
+                            detections,
+                            generic.alignment,
+                            detect_fields(generic.image, dynamic_layout),
                         ),
                     )
                 except LayoutDetectionError:
@@ -297,5 +316,10 @@ class AutoOMRProcessor:
             "generic_dynamic",
             str(generic.layout["name"]),
             processor,
-            OMRReadResult(generic.image, detections, generic.alignment),
+            OMRReadResult(
+                generic.image,
+                detections,
+                generic.alignment,
+                detect_fields(generic.image, generic.layout),
+            ),
         )

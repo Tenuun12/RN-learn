@@ -6,7 +6,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .layout import Question, questions_by_part
+from .layout import Bubble, Question, questions_by_part
 
 
 @dataclass(frozen=True)
@@ -185,3 +185,36 @@ def detect_answers(image: np.ndarray, layout: dict[str, Any]) -> dict[str, dict[
             for question in questions
         }
     return result
+
+
+def detect_fields(image: np.ndarray, layout: dict[str, Any]) -> dict[str, Detection]:
+    """Detect non-graded bubble fields such as the sheet variant."""
+    fields = layout.get("fields", {})
+    if not fields:
+        return {}
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    detection = layout["detection"]
+    kernel_size = int(detection.get("illumination_kernel", 0))
+    if kernel_size >= 3:
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        gray = cv2.divide(gray, np.maximum(background, 1), scale=255)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    runtime_detection = {
+        **detection,
+        "dark_pixel_threshold": _adaptive_dark_threshold(gray, layout, detection),
+    }
+    results: dict[str, Detection] = {}
+    for field_name, field in fields.items():
+        options = field["options"]
+        x_center = int(field["x_center"])
+        bubbles = tuple(
+            Bubble("metadata", field_name, option, x_center, int(y_center))
+            for option, y_center in zip(options, field["y_centers"], strict=True)
+        )
+        results[field_name] = detect_question(
+            gray, Question("metadata", field_name, bubbles), runtime_detection
+        )
+    return results
