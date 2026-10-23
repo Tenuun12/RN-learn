@@ -121,14 +121,44 @@ def _merge_discovered_rows(
                 records.append(
                     (
                         ref_index,
-                        float(candidate.bubbles[0].y),
-                        [b.x for b in candidate.bubbles],
+                        float(question.bubbles[0].y),
+                        [bubble.x for bubble in question.bubbles],
                         question.question,
                     )
                 )
 
         known = sorted((record for record in records if record[0] is not None), key=lambda row: row[0])
         extra = sorted((record for record in records if record[0] is None), key=lambda row: row[1])
+        # Discovery often mistakes printed text, grid edges, or annotation
+        # artifacts for additional answer rows. For a template-matched page,
+        # only accept rows that continue below the calibrated answer area.
+        # Unmatched candidates inside the calibrated range are noise; the
+        # known template already defines those rows more reliably.
+        reference_y = sorted(
+            {float(question.bubbles[0].y) for question in reference}
+        )
+        if reference_y:
+            row_steps = [
+                current - previous
+                for previous, current in zip(reference_y, reference_y[1:])
+                if current > previous
+            ]
+            typical_step = float(np.median(row_steps)) if row_steps else 0.0
+            extension_start = reference_y[-1] + max(3.0, typical_step * 0.55)
+            reference_x = [
+                np.asarray([bubble.x for bubble in question.bubbles])
+                for question in reference
+            ]
+            extra = [
+                record
+                for record in extra
+                if record[1] >= extension_start
+                and any(
+                    centers.shape == np.asarray(record[2]).shape
+                    and float(np.mean(np.abs(centers - record[2]))) <= 12
+                    for centers in reference_x
+                )
+            ]
         ordered = known + extra
         if not ordered:
             return None
@@ -227,9 +257,32 @@ class AutoOMRProcessor:
                 discovered_counts.get(part, 0) > template_counts.get(part, 0)
                 for part in set(discovered_counts) | set(template_counts)
             ):
+                # Only extend a known template when discovery found every
+                # calibrated row as well. Partial generic grids commonly miss
+                # faint/blank rows; merging them would silently drop answers.
+                if any(
+                    discovered_counts.get(part, 0) < count
+                    for part, count in template_counts.items()
+                ):
+                    return best
                 discovered_layout = _merge_discovered_rows(
                     best.processor.layout, discovered.layout
-                ) or discovered.layout
+                )
+                # A discovered grid can include text or printed bubble outlines
+                # as false candidates. If it cannot be reconciled with the
+                # matched calibrated template, keep that template instead of
+                # replacing it with the lower-confidence generic layout.
+                if discovered_layout is None:
+                    return best
+                merged_counts = {
+                    part: sum(grid["count"] for grid in section["grids"])
+                    for part, section in discovered_layout["parts"].items()
+                }
+                if not any(
+                    merged_counts.get(part, 0) > count
+                    for part, count in template_counts.items()
+                ):
+                    return best
                 # The image is already rectified to the selected template's
                 # coordinate system. Keep its non-graded metadata fields even
                 # when the discovered answer rows cannot be merged.
@@ -277,32 +330,65 @@ class AutoOMRProcessor:
                         registration_image,
                         validate_bubble_grid=False,
                     )
-                    generic = detect_generic_layout(
-                        rectified.image,
-                    )
-                    dynamic_layout = _merge_discovered_rows(
-                        reference.layout, generic.layout
-                    ) or generic.layout
-                    # `rectified.image` uses the reference layout's canonical
-                    # coordinates, so its field calibration remains valid.
-                    dynamic_layout.setdefault(
-                        "fields", deepcopy(reference.layout.get("fields", {}))
-                    )
-                    processor = OMRProcessor(dynamic_layout)
-                    detections = detect_answers(generic.image, dynamic_layout)
-                    return AutoOMRReadResult(
-                        "generic_dynamic",
-                        str(dynamic_layout["name"]),
-                        processor,
-                        OMRReadResult(
-                            generic.image,
-                            detections,
-                            generic.alignment,
-                            detect_fields(generic.image, dynamic_layout),
-                        ),
-                    )
                 except LayoutDetectionError:
                     continue
+
+                # The alignment error can be caused by noisy bubble discovery
+                # on an otherwise recognizable template. Use the calibrated
+                # rows as the baseline; only extend them when discovery
+                # reproduces every calibrated row and adds coherent rows.
+                dynamic_layout = reference.layout
+                selected_template_id = str(reference.layout["id"])
+                try:
+                    generic = detect_generic_layout(rectified.image)
+                    merged_layout = _merge_discovered_rows(
+                        reference.layout, generic.layout
+                    )
+                    if merged_layout is not None:
+                        reference_counts = {
+                            part: sum(
+                                grid["count"]
+                                for grid in section["grids"]
+                            )
+                            for part, section in reference.layout["parts"].items()
+                        }
+                        merged_counts = {
+                            part: sum(
+                                grid["count"]
+                                for grid in section["grids"]
+                            )
+                            for part, section in merged_layout["parts"].items()
+                        }
+                        complete = all(
+                            merged_counts.get(part, 0) >= count
+                            for part, count in reference_counts.items()
+                        )
+                        extended = any(
+                            merged_counts.get(part, 0) > count
+                            for part, count in reference_counts.items()
+                        )
+                        if complete and extended:
+                            dynamic_layout = merged_layout
+                            selected_template_id = "generic_dynamic"
+                except LayoutDetectionError:
+                    pass
+
+                # `rectified.image` uses the reference layout's canonical
+                # coordinates, so detections and metadata must use that image.
+                processor = OMRProcessor(dynamic_layout)
+                detections = detect_answers(rectified.image, dynamic_layout)
+                fields = detect_fields(rectified.image, dynamic_layout)
+                return AutoOMRReadResult(
+                    selected_template_id,
+                    str(dynamic_layout.get("name", selected_template_id)),
+                    processor,
+                    OMRReadResult(
+                        rectified.image,
+                        detections,
+                        rectified,
+                        fields,
+                    ),
+                )
 
         try:
             generic = detect_generic_layout(image, registration_image)

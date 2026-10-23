@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import cv2
@@ -20,6 +24,8 @@ class DecodedQRCode:
 @dataclass(frozen=True)
 class QRDetectionResult:
     codes: tuple[DecodedQRCode, ...] = ()
+    student_id: str | None = None
+    student_id_source: str | None = None
 
     @property
     def detected(self) -> bool:
@@ -36,6 +42,8 @@ class QRDetectionResult:
             "qr_data": first.data if first else None,
             "qr_url": first.url if first else None,
             "qr_codes": [code.as_dict() for code in self.codes],
+            "student_id": self.student_id,
+            "student_id_source": self.student_id_source,
         }
 
     def mask_for_alignment(self, image: np.ndarray) -> np.ndarray:
@@ -182,3 +190,69 @@ def detect_qr_codes(image: np.ndarray) -> QRDetectionResult:
             for value, corners in found.items()
         )
     )
+
+
+def read_printed_student_id(
+    image: np.ndarray,
+    region: tuple[int, int, int, int] | list[int] | None,
+    reference_size: tuple[int, int] | None = None,
+) -> str | None:
+    """Read the printed RN student ID as a fallback when its QR is unreadable.
+
+    `region` is an (x0, y0, x1, y1) rectangle in the calibrated sheet. This
+    fallback reports the ID source separately and never claims the QR itself
+    was decoded.
+    """
+    if image is None or image.size == 0 or region is None or len(region) != 4:
+        return None
+
+    executable = shutil.which("tesseract")
+    if executable is None:
+        windows_tesseract = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+        if windows_tesseract.is_file():
+            executable = str(windows_tesseract)
+    if executable is None:
+        return None
+
+    image_height, image_width = image.shape[:2]
+    scale_x = image_width / reference_size[0] if reference_size else 1.0
+    scale_y = image_height / reference_size[1] if reference_size else 1.0
+    x0, y0, x1, y1 = region
+    left = max(0, min(image_width, int(round(x0 * scale_x))))
+    top = max(0, min(image_height, int(round(y0 * scale_y))))
+    right = max(0, min(image_width, int(round(x1 * scale_x))))
+    bottom = max(0, min(image_height, int(round(y1 * scale_y))))
+    crop = image[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    enlarged = cv2.resize(gray, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    encoded, png = cv2.imencode(".png", enlarged)
+    if not encoded:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "stdin",
+                "stdout",
+                "--psm",
+                "7",
+                "-c",
+                "tessedit_char_whitelist=RN-0123456789",
+            ],
+            input=png.tobytes(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    text = result.stdout.decode("utf-8", errors="ignore").upper()
+    match = re.search(r"RN\s*[-–]?\s*(\d{4})\s*[-–]?\s*(\d{4})", text)
+    return f"RN-{match.group(1)}-{match.group(2)}" if match else None

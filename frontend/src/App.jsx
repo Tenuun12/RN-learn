@@ -289,7 +289,7 @@ function UploadStage({ test, answerKey, onEdit, onGraded, busy, setBusy, setErro
       updated_at: test.updated_at,
     }));
     try {
-      const payload = await api(`/api/tests/${test.id}/grade`, { method: "POST", body });
+      const payload = await api(`/api/tests/${test.id}/grade?include_details=true`, { method: "POST", body });
       onGraded(payload);
     } catch (error) {
       setError(error.message === "Failed to fetch" ? "Cannot reach the OMR server." : error.message);
@@ -387,12 +387,13 @@ function QRResult({ data }) {
   const codes = Array.isArray(data.qr_codes) && data.qr_codes.length
     ? data.qr_codes
     : fallbackCodes;
+  const recoveredStudentId = !codes.length && data.student_id;
 
   return (
-    <section className={`qr-panel ${codes.length ? "detected" : "not-detected"}`} aria-label="QR code result">
+    <section className={`qr-panel ${codes.length || recoveredStudentId ? "detected" : "not-detected"}`} aria-label="QR code result">
       <div className="panel-heading">
-        <div><span className="eyebrow">QR code</span><h2>{codes.length ? "Detected" : "Not detected"}</h2></div>
-        <span className={`qr-status ${codes.length ? "detected" : "empty"}`}><i />{codes.length ? `${codes.length} found` : "No readable code"}</span>
+        <div><span className="eyebrow">QR code</span><h2>{codes.length ? "Detected" : recoveredStudentId ? "Student ID recovered" : "Not detected"}</h2></div>
+        <span className={`qr-status ${codes.length || recoveredStudentId ? "detected" : "empty"}`}><i />{codes.length ? `${codes.length} found` : recoveredStudentId ? "Read from printed ID" : "No readable code"}</span>
       </div>
       {codes.length > 0 && (
         <div className="qr-code-list">
@@ -405,6 +406,13 @@ function QRResult({ data }) {
               </article>
             );
           })}
+        </div>
+      )}
+      {recoveredStudentId && (
+        <div className="qr-code-list">
+          <article className="qr-code-item">
+            <div><small>Student ID read from printed text</small><p>{data.student_id}</p></div>
+          </article>
         </div>
       )}
     </section>

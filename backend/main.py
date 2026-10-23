@@ -3,15 +3,16 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import cv2
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -20,7 +21,7 @@ try:
     from backend.omr.layout import questions_by_part
     from backend.omr.processor import AutoOMRProcessor, OMRProcessor
     from backend.omr.visualizer import annotate_results
-    from backend.qr import QRDetectionResult, detect_qr_codes
+    from backend.qr import QRDetectionResult, detect_qr_codes, read_printed_student_id
     from backend.storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
 except ModuleNotFoundError:  # Vercel service root is backend/
     from grading import grade_detections
@@ -28,7 +29,7 @@ except ModuleNotFoundError:  # Vercel service root is backend/
     from omr.layout import questions_by_part
     from omr.processor import AutoOMRProcessor, OMRProcessor
     from omr.visualizer import annotate_results
-    from qr import QRDetectionResult, detect_qr_codes
+    from qr import QRDetectionResult, detect_qr_codes, read_printed_student_id
     from storage import AnswerKeyNotFoundError, TestNotFoundError, TestRepository
 
 
@@ -215,6 +216,83 @@ def _serialize_detections(detections: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _numeric_answer(answer: str | None, option_labels: str) -> str:
+    """Map a selected bubble label to its 1-based numeric API representation."""
+    if answer is None or answer in {"-", "Multiple", "Uncertain"}:
+        return "0"
+    # Part 2's numeric bubbles retain their printed 0-9 values.
+    if option_labels == "0123456789" and answer in "0123456789":
+        return answer
+    if answer in option_labels:
+        return str(option_labels.index(answer) + 1)
+    return "0"
+
+
+def _paper_test_id(qr_payload: str | None) -> str | None:
+    """Read the paper ID from supported QR payloads."""
+    if not qr_payload:
+        return None
+    explicit = re.search(r"(?:^|[|?&])paper\s*[:=]\s*(\d+)", qr_payload, re.IGNORECASE)
+    if explicit:
+        return str(int(explicit.group(1)))
+    rn_format = re.search(r"(?:^|[^A-Z0-9])RN-(\d+)-\d+(?:$|[^0-9])", qr_payload, re.IGNORECASE)
+    if rn_format:
+        return str(int(rn_format.group(1)))
+    return None
+
+
+def _external_result(
+    *,
+    qr_payload: str | None,
+    file_url: str,
+    variant: str | None,
+    student_answers: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    """Serialize the grading result in the consumer's problem/subproblem format."""
+    test_user_id = qr_payload
+    if test_user_id:
+        test_user_id = re.split(r"\|paper\s*[:=]", test_user_id, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+    questions: list[dict[str, str]] = []
+    for question_id, answer in student_answers.get("part1", {}).items():
+        questions.append(
+            {
+                "problem_type": "1",
+                "problem_id": str(question_id),
+                "problem_sub_id": "0",
+                "answer": _numeric_answer(answer, "ABCDE"),
+            }
+        )
+
+    # Preserve the sheet's printed group and subquestion labels (for example,
+    # 2.1a -> problem 1, subproblem 1; 2.4h -> problem 4, subproblem 8).
+    for index, (question_id, answer) in enumerate(student_answers.get("part2", {}).items()):
+        label_match = re.fullmatch(r"2\.(\d+)([a-z])", question_id.strip(), re.IGNORECASE)
+        if label_match:
+            problem_id = int(label_match.group(1))
+            problem_sub_id = ord(label_match.group(2).lower()) - ord("a") + 1
+        else:
+            # Keep unexpected labels visible in a stable eight-row order.
+            problem_id = index // 8 + 1
+            problem_sub_id = index % 8 + 1
+        questions.append(
+            {
+                "problem_type": "2",
+                "problem_id": str(problem_id),
+                "problem_sub_id": str(problem_sub_id),
+                "answer": _numeric_answer(answer, "0123456789"),
+            }
+        )
+
+    return {
+        "paper_test_id": _paper_test_id(qr_payload),
+        "test_user_id": test_user_id,
+        "file_url": file_url,
+        "variant": _numeric_answer(variant, "ABCD") if variant else "0",
+        "questions": questions,
+    }
+
+
 app = FastAPI(
     title="Teacher OMR Test Grader",
     version="2.0.0",
@@ -222,6 +300,14 @@ app = FastAPI(
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
 )
+
+
+@app.get("/docs", include_in_schema=False)
+def local_swagger_docs() -> RedirectResponse:
+    """Keep the conventional local FastAPI docs URL as an alias."""
+    return RedirectResponse(url="/api/docs", status_code=307)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -345,6 +431,10 @@ def get_answer_key(test_id: str) -> dict[str, Any]:
 @app.post("/api/tests/{test_id}/grade")
 async def grade_student_sheet(
     test_id: str,
+    include_details: bool = Query(
+        False,
+        description="Set true to include grading, alignment, and image debug details.",
+    ),
     image: UploadFile = File(...),
     answer_key_json: str | None = Form(None),
     test_config_json: str | None = Form(None),
@@ -422,6 +512,33 @@ async def grade_student_sheet(
     except LayoutDetectionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    qr_payload = qr_result.first.data if qr_result.first else None
+    student_id_match = (
+        re.search(r"RN-\d{4}-\d{4}", qr_payload, re.IGNORECASE)
+        if qr_payload
+        else None
+    )
+    student_id = student_id_match.group(0).upper() if student_id_match else None
+    student_id_source = "qr" if student_id else None
+    if student_id is None:
+        layout = selected_processor.layout
+        reference_size = (
+            int(layout["image_width"]),
+            int(layout["image_height"]),
+        ) if layout.get("image_width") and layout.get("image_height") else None
+        student_id = read_printed_student_id(
+            omr.aligned_image,
+            layout.get("student_id_region"),
+            reference_size,
+        )
+        if student_id:
+            student_id_source = "printed-text-ocr"
+    qr_result = QRDetectionResult(
+        qr_result.codes,
+        student_id,
+        student_id_source,
+    )
+
     graded = grade_detections(omr.detections, answer_key, test["scoring"])
     annotated = annotate_results(
         omr.aligned_image,
@@ -451,21 +568,36 @@ async def grade_student_sheet(
                 + base64.b64encode(encoded_preview.tobytes()).decode("ascii")
             )
 
+    variant_detection = omr.fields.get("variant") if omr.fields else None
+    variant_info = (
+        None
+        if variant_detection is None
+        else {
+            "answer": variant_detection.answer,
+            "state": variant_detection.state,
+            "selected": list(variant_detection.selected),
+            "confidence": variant_detection.confidence,
+        }
+    )
+    annotated_image_url = f"/api/results/{result_id}/annotated.png"
+    qr_payload = qr_result.first.data if qr_result.first else qr_result.student_id
+    result_payload = _external_result(
+        qr_payload=qr_payload,
+        file_url=annotated_image_url,
+        variant=variant_detection.answer if variant_detection else None,
+        student_answers=graded["student_answers"],
+    )
+
+    if not include_details:
+        return {"result": result_payload}
+
     return {
         "success": True,
         "test": _serialize_test(test),
         "answer_key": answer_key,
         "detected_answers": _serialize_detections(omr.detections),
-        "variant": (
-            None
-            if not omr.fields or "variant" not in omr.fields
-            else {
-                "answer": omr.fields["variant"].answer,
-                "state": omr.fields["variant"].state,
-                "selected": list(omr.fields["variant"].selected),
-                "confidence": omr.fields["variant"].confidence,
-            }
-        ),
+        "variant": variant_info,
+        "result": result_payload,
         **graded,
         **qr_result.response_fields(),
         "alignment": {
@@ -478,7 +610,7 @@ async def grade_student_sheet(
             "confidence": round(omr.alignment.confidence, 4),
         },
         "result_id": result_id,
-        "annotated_image_url": f"/api/results/{result_id}/annotated.png",
+        "annotated_image_url": annotated_image_url,
         "annotated_image_data_url": annotated_data_url,
         "qr_image_data_url": qr_image_data_urls[0] if qr_image_data_urls else None,
         "qr_image_data_urls": qr_image_data_urls,

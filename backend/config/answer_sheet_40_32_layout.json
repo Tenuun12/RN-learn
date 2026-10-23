@@ -75,6 +75,7 @@
       "y_centers": [254, 299, 344, 389]
     }
   },
+  "student_id_region": [90, 345, 260, 380],
   "parts": {
     "part1": {
       "label": "Part 1",
